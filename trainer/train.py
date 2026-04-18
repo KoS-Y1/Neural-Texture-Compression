@@ -14,7 +14,8 @@ import latent_texture
 import mlp
 
 PROJECT_ROOT = _THIS_DIR.parent
-ASSETS_DIR = PROJECT_ROOT / "assets"
+ASSETS_LOAD_DIR = PROJECT_ROOT / "assets/source"
+ASSETS_EXPORT_DIR = PROJECT_ROOT / "assets/export"
 MODEL_DIR = PROJECT_ROOT / "model"
 
 
@@ -217,10 +218,10 @@ def main(resolution=None, num_iter=10000):
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
     paths = {
-        'base_color': str(ASSETS_DIR / "Default_albedo.jpg"),
-        'normal': str(ASSETS_DIR / "Default_normal.jpg"),
-        'ao': str(ASSETS_DIR / "Default_AO.jpg"),
-        'emissive': str(ASSETS_DIR / "Default_emissive.jpg"),
+        'base_color': str(ASSETS_LOAD_DIR / "Default_albedo.jpg"),
+        'normal': str(ASSETS_LOAD_DIR / "Default_normal.jpg"),
+        'ao': str(ASSETS_LOAD_DIR / "Default_AO.jpg"),
+        'emissive': str(ASSETS_LOAD_DIR / "Default_emissive.jpg"),
     }
 
     print("Loading textures at native resolution..." if resolution is None
@@ -254,8 +255,8 @@ def main(resolution=None, num_iter=10000):
     lo_viz = visualize_latent(latent_tex.latent_lo)
     hi_pil = tensor_to_pil(hi_viz)
     lo_pil = tensor_to_pil(lo_viz)
-    hi_pil.save(MODEL_DIR / "latent_hi.png")
-    lo_pil.save(MODEL_DIR / "latent_lo.png")
+    hi_pil.save(ASSETS_EXPORT_DIR / "latent_hi.png")
+    lo_pil.save(ASSETS_EXPORT_DIR / "latent_lo.png")
     latent_display = hi_pil.resize((resolution, resolution), Image.NEAREST)
 
     rows = []
@@ -271,8 +272,8 @@ def main(resolution=None, num_iter=10000):
         psnr = float('inf') if mse == 0 else -10.0 * np.log10(mse)
         print(f"  {name:12s}: PSNR {psnr:.2f} dB  (MSE {mse:.6f})")
 
-        rec_pil.save(MODEL_DIR / f"reconstructed_{name}.png")
-        diff_pil.save(MODEL_DIR / f"diff_{name}.png")
+        rec_pil.save(ASSETS_EXPORT_DIR / f"reconstructed_{name}.png")
+        diff_pil.save(ASSETS_EXPORT_DIR / f"diff_{name}.png")
 
         rows.append({
             'name': f"{name}  PSNR {psnr:.2f} dB",
@@ -286,9 +287,9 @@ def main(resolution=None, num_iter=10000):
     overall_psnr = float('inf') if overall_mse == 0 else -10.0 * np.log10(overall_mse)
     print(f"  {'overall':12s}: PSNR {overall_psnr:.2f} dB  (MSE {overall_mse:.6f})")
 
-    save_comparison(rows, str(MODEL_DIR / "comparison.png"))
+    save_comparison(rows, str(ASSETS_EXPORT_DIR / "comparison.png"))
 
-    print(f"Done. Outputs written to {MODEL_DIR}")
+    print(f"Done")
 
 
 if __name__ == '__main__':
