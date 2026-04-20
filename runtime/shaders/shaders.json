@@ -1,0 +1,6 @@
+{
+    "shaders":[
+        "../runtime/shaders/forward.slang",
+        "../runtime/shaders/skybox.slang"
+    ]
+}

@@ -1,8 +1,10 @@
+import json
 import sys
 from pathlib import Path
 
 import numpy as np
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
@@ -16,7 +18,6 @@ import mlp
 PROJECT_ROOT = _THIS_DIR.parent
 ASSETS_LOAD_DIR = PROJECT_ROOT / "assets/source"
 ASSETS_EXPORT_DIR = PROJECT_ROOT / "assets/export"
-MODEL_DIR = PROJECT_ROOT / "model"
 
 
 def train_ntc(texture_bundle: torch.Tensor, num_iter=20000, batch_size=65536, lr_latent=0.01, lr_mlp=0.005):
@@ -24,7 +25,7 @@ def train_ntc(texture_bundle: torch.Tensor, num_iter=20000, batch_size=65536, lr
 
     num_channels = texture_bundle.shape[0]  # Channels of the texture bundle
 
-    def get_latent_res(texture_res: int, compression_ratio=2, lo_scale=4):
+    def get_latent_res(texture_res: int, compression_ratio=4, lo_scale=8):
         hi_res = texture_res // compression_ratio
         lo_res = texture_res // lo_scale
 
@@ -133,6 +134,137 @@ def export_ntc(latent_tex: latent_texture.LatentTexture, mlp_decoder: mlp.MlpDec
     }, path)
 
 
+def _quantize_to_unorm8(x: torch.Tensor, num_bits: int) -> np.ndarray:
+    """Quantize to num_bits levels, then remap to full [0, 255] uint8 range.
+
+    This preserves the training-time quantization error while letting Vulkan
+    sample the texture as R8_UNORM and receive values in [0, 1] directly.
+    """
+    qmax = (2 ** num_bits) - 1
+    x_clamped = torch.clamp(x, 0, 1)
+    codes = torch.round(x_clamped * qmax) / qmax
+    return (codes * 255.0).round().to(torch.uint8).cpu().numpy()
+
+
+def _latent_to_interleaved_hwc(latent: torch.Tensor, num_bits: int) -> np.ndarray:
+    """[1, C, H, W] latent parameter -> [H, W, C] uint8 buffer, UNORM-ready."""
+    tensor = latent.detach()[0]  # [C, H, W]
+    quantized = _quantize_to_unorm8(tensor, num_bits)  # [C, H, W]
+    return np.ascontiguousarray(np.transpose(quantized, (1, 2, 0)))  # [H, W, C]
+
+
+def export_runtime(
+    latent_tex: latent_texture.LatentTexture,
+    mlp_decoder: mlp.MlpDecoder,
+    pe: mlp.PositionalEncoder,
+    out_dir: Path,
+    hi_bits: int = 8,
+    lo_bits: int = 4,
+):
+    """Export latent grids, MLP weights, and a JSON header for the C++ runtime.
+
+    Layout:
+      out_dir/
+        ntc.json        -- config, layer shapes, byte offsets
+        latent_hi.bin   -- uint8, row-major [H, W, C], UNORM-ready
+        latent_lo.bin   -- uint8, row-major [H, W, C], UNORM-ready
+        mlp.bin         -- float32, concatenated Linear layers in forward order,
+                           each layer stored as weight [out, in] row-major then
+                           bias [out].
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    hi_hwc = _latent_to_interleaved_hwc(latent_tex.latent_hi, hi_bits)
+    lo_hwc = _latent_to_interleaved_hwc(latent_tex.latent_lo, lo_bits)
+    (out_dir / "latent_hi.bin").write_bytes(hi_hwc.tobytes())
+    (out_dir / "latent_lo.bin").write_bytes(lo_hwc.tobytes())
+
+    def _activation_name(m: nn.Module) -> str:
+        if isinstance(m, nn.ReLU):
+            return "relu"
+        if isinstance(m, nn.Sigmoid):
+            return "sigmoid"
+        return "none"
+
+    linear_layers: list[tuple[nn.Linear, str]] = []
+    modules = list(mlp_decoder.net)
+    for i, m in enumerate(modules):
+        if isinstance(m, nn.Linear):
+            activation = _activation_name(modules[i + 1]) if i + 1 < len(modules) else "none"
+            linear_layers.append((m, activation))
+
+    mlp_buffers: list[bytes] = []
+    mlp_layers_meta = []
+    offset = 0
+    for linear, activation in linear_layers:
+        weight = linear.weight.detach().cpu().contiguous().float().numpy()  # [out, in]
+        bias = linear.bias.detach().cpu().contiguous().float().numpy()       # [out]
+
+        weight_bytes = weight.tobytes()
+        bias_bytes = bias.tobytes()
+
+        mlp_layers_meta.append({
+            "in": int(weight.shape[1]),
+            "out": int(weight.shape[0]),
+            "activation": activation,
+            "weight_offset": offset,
+            "weight_size": len(weight_bytes),
+            "bias_offset": offset + len(weight_bytes),
+            "bias_size": len(bias_bytes),
+        })
+
+        mlp_buffers.append(weight_bytes)
+        mlp_buffers.append(bias_bytes)
+        offset += len(weight_bytes) + len(bias_bytes)
+
+    (out_dir / "mlp.bin").write_bytes(b"".join(mlp_buffers))
+
+    hi_h, hi_w, hi_c = hi_hwc.shape
+    lo_h, lo_w, lo_c = lo_hwc.shape
+    input_dim = mlp_layers_meta[0]["in"] if mlp_layers_meta else 0
+    output_dim = mlp_layers_meta[-1]["out"] if mlp_layers_meta else 0
+
+    header = {
+        "version": 1,
+        "latent_hi": {
+            "file": "latent_hi.bin",
+            "width": hi_w,
+            "height": hi_h,
+            "channels": hi_c,
+            "dtype": "uint8",
+            "layout": "hwc_interleaved",
+            "sample_format": "unorm",
+            "source_bits": hi_bits,
+        },
+        "latent_lo": {
+            "file": "latent_lo.bin",
+            "width": lo_w,
+            "height": lo_h,
+            "channels": lo_c,
+            "dtype": "uint8",
+            "layout": "hwc_interleaved",
+            "sample_format": "unorm",
+            "source_bits": lo_bits,
+        },
+        "positional_encoder": {
+            "num_freq": int(pe.num_freq),
+            "out_dim": int(pe.out_dim),
+        },
+        "mlp": {
+            "file": "mlp.bin",
+            "dtype": "float32",
+            "weight_layout": "row_major_out_in",
+            "input_dim": input_dim,
+            "output_dim": output_dim,
+            "total_bytes": offset,
+            "layers": mlp_layers_meta,
+        },
+    }
+
+    with (out_dir / "ntc.json").open("w") as f:
+        json.dump(header, f, indent=2)
+
+
 def decompress_texel(uv, mip_level, latent_tex, mlp_decoder, pe):
     feat = latent_tex.sample(uv)
     pe_feat = pe(uv)
@@ -215,7 +347,7 @@ def diff_image(orig: torch.Tensor, rec: torch.Tensor, amplify: float = 5.0) -> I
 
 
 def main(resolution=None, num_iter=10000):
-    MODEL_DIR.mkdir(parents=True, exist_ok=True)
+    ASSETS_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     paths = {
         'base_color': str(ASSETS_LOAD_DIR / "Default_albedo.jpg"),
@@ -237,7 +369,10 @@ def main(resolution=None, num_iter=10000):
     device = next(mlp_decoder.parameters()).device
 
     print("Saving compressed NTC model...")
-    export_ntc(latent_tex, mlp_decoder, pe, str(MODEL_DIR / "ntc.pt"))
+    export_ntc(latent_tex, mlp_decoder, pe, str(ASSETS_EXPORT_DIR / "ntc.pt"))
+
+    print("Saving runtime layout for C++ ...")
+    export_runtime(latent_tex, mlp_decoder, pe, ASSETS_EXPORT_DIR / "runtime")
 
     print("Reconstructing full textures...")
     reconstructed = reconstruct_texture(resolution, latent_tex, mlp_decoder, pe, device)

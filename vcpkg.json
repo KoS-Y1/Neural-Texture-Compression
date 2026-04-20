@@ -1,0 +1,35 @@
+{
+  "name" : "vrez-rt",
+  "version" : "0.1.0",
+  "builtin-baseline" : "bf60f47fd3006161b27d539aeb5dc464be4bcb65",
+  "dependencies" : [ {
+    "name" : "imgui",
+    "version>=" : "1.91.9",
+    "features" : [ "sdl3-binding", "vulkan-binding" ]
+  }, {
+    "name" : "spdlog",
+    "version>=" : "1.17.0"
+  }, {
+    "name" : "vulkan-memory-allocator",
+    "version>=" : "3.3.0"
+  }, {
+    "name" : "simdjson",
+    "version>=" : "4.2.4"
+  }, {
+    "name" : "shader-slang",
+    "version>=" : "2025.22.1"
+  }, {
+    "name" : "stb",
+    "version>=" : "2024-07-29#1"
+  }, {
+    "name" : "sdl3",
+    "version>=" : "3.4.0",
+    "features" : [ "vulkan" ]
+  }, {
+    "name" : "glm",
+    "version>=" : "1.0.3"
+  }, {
+    "name" : "tinyobjloader",
+    "version>=" : "2.0.0rc13"
+  } ]
+}

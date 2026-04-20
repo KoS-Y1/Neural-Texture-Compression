@@ -1,0 +1,64 @@
+{
+  "version": 1,
+  "latent_hi": {
+    "file": "latent_hi.bin",
+    "width": 512,
+    "height": 512,
+    "channels": 4,
+    "dtype": "uint8",
+    "layout": "hwc_interleaved",
+    "sample_format": "unorm",
+    "source_bits": 8
+  },
+  "latent_lo": {
+    "file": "latent_lo.bin",
+    "width": 256,
+    "height": 256,
+    "channels": 4,
+    "dtype": "uint8",
+    "layout": "hwc_interleaved",
+    "sample_format": "unorm",
+    "source_bits": 4
+  },
+  "positional_encoder": {
+    "num_freq": 8,
+    "out_dim": 32
+  },
+  "mlp": {
+    "file": "mlp.bin",
+    "dtype": "float32",
+    "weight_layout": "row_major_out_in",
+    "input_dim": 41,
+    "output_dim": 12,
+    "total_bytes": 30512,
+    "layers": [
+      {
+        "in": 41,
+        "out": 64,
+        "activation": "relu",
+        "weight_offset": 0,
+        "weight_size": 10496,
+        "bias_offset": 10496,
+        "bias_size": 256
+      },
+      {
+        "in": 64,
+        "out": 64,
+        "activation": "relu",
+        "weight_offset": 10752,
+        "weight_size": 16384,
+        "bias_offset": 27136,
+        "bias_size": 256
+      },
+      {
+        "in": 64,
+        "out": 12,
+        "activation": "sigmoid",
+        "weight_offset": 27392,
+        "weight_size": 3072,
+        "bias_offset": 30464,
+        "bias_size": 48
+      }
+    ]
+  }
+}
