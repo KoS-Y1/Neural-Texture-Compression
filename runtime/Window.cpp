@@ -10,6 +10,9 @@
 #include "Debug.h"
 #include "VulkanState.h"
 
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
+
 namespace {
 constexpr int kMaxWindowWidth{1600};
 constexpr int kMaxWindowHeight{900};
@@ -79,7 +82,9 @@ void Window::Run() {
                 break;
             }
             processInput(event);
+            ImGui_ImplSDL3_ProcessEvent(&event);
         }
+
         state.Run();
     }
 

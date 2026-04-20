@@ -5,6 +5,7 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <deque>
 #include <functional>
 #include <vk_mem_alloc.h>
@@ -95,6 +96,25 @@ private:
     VkDescriptorSetLayout m_skyboxSetLayout{};
     VkSampler             m_defaultSampler{};
 
+    VkDescriptorPool m_descriptorPool{};
+
+    void ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth);
+    void Skybox(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
+    void ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
+
+    // Profiling
+    static constexpr size_t kFrameHistorySize = 128;
+
+    VkQueryPool                                    m_queryPool{};
+    float                                          m_timestampPeriod{1.0f};
+    float                                          m_pbrTime{0.0f};
+    float                                          m_lastFrameTime{0.0f};
+    std::array<float, kFrameHistorySize>           m_frameTimeHistory{};
+    uint32_t                                       m_frameHistoryIndex{0};
+    uint64_t                                       m_totalFrameCount{0};
+    std::chrono::high_resolution_clock::time_point m_lastFrameStart{};
+
+    void DrawImGuiContent();
 
 private:
     // Commands

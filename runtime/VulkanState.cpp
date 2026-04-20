@@ -5,11 +5,15 @@
 #include "VulkanState.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <vector>
 
 #include <SDL3/SDL_video.h>
 #include <SDL3/SDL_vulkan.h>
+#include <imgui.h>
+#include <imgui_impl_sdl3.h>
+#include <imgui_impl_vulkan.h>
 #include <stb_image.h>
 
 #include "Camera.h"
@@ -128,10 +132,9 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
             }
         }
 
-        VkPhysicalDeviceProperties  properties{};
-        VkPhysicalDeviceProperties2 properties2{.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .properties = properties};
-
-        vkGetPhysicalDeviceProperties2(m_physicalDevice, &properties2);
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(m_physicalDevice, &properties);
+        m_timestampPeriod = properties.limits.timestampPeriod;
         DebugInfo(
             "Selected physical device: {} {}.{}.{}",
             properties.deviceName,
@@ -334,6 +337,20 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
         DebugCheckCritical(result == VK_SUCCESS, "Failed to allocate immediate command buffer");
         m_deletionQueue.Push([&]() { vkFreeCommandBuffers(m_device, m_commandPool, 1, &m_immediateCommandBuffer); });
     }
+
+    // Timestamp query pool
+    {
+        const VkQueryPoolCreateInfo infoQueryPool{
+            .sType      = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
+            .queryType  = VK_QUERY_TYPE_TIMESTAMP,
+            .queryCount = kMaxFramesInFlight * 2,
+        };
+        VkResult result = vkCreateQueryPool(m_device, &infoQueryPool, nullptr, &m_queryPool);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create timestamp query pool");
+        m_deletionQueue.Push([&]() { vkDestroyQueryPool(m_device, m_queryPool, nullptr); });
+    }
+
+    m_lastFrameStart = std::chrono::high_resolution_clock::now();
 
     ShaderCompiler shaderCompiler;
 
@@ -725,6 +742,76 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
         vkDestroyShaderModule(m_device, shaderModule, nullptr);
     }
 
+    // Descriptor pool for ImGui
+    {
+        const std::vector<VkDescriptorPoolSize> poolSizes{
+            {VK_DESCRIPTOR_TYPE_SAMPLER,                1000},
+            {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1000},
+            {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,          1000},
+            {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1000},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER,   1000},
+            {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER,   1000},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         1000},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         1000},
+            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1000},
+            {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 1000},
+            {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,       1000}
+        };
+
+        const VkDescriptorPoolCreateInfo infoPool{
+            .sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO,
+            .pNext         = nullptr,
+            .flags         = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT | VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT,
+            .maxSets       = 1024,
+            .poolSizeCount = static_cast<uint32_t>(poolSizes.size()),
+            .pPoolSizes    = poolSizes.data()
+        };
+        VkResult result = vkCreateDescriptorPool(m_device, &infoPool, nullptr, &m_descriptorPool);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create descriptor pool");
+        m_deletionQueue.Push([&]() { vkDestroyDescriptorPool(m_device, m_descriptorPool, nullptr); });
+    }
+
+    // ImGui
+    {
+        ImGui::CreateContext();
+
+        ImGui_ImplSDL3_InitForVulkan(m_window);
+
+        ImGuiIO &io     = ImGui::GetIO();
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard; // Enable Keyboard Controls
+        io.ConfigFlags |= ImGuiConfigFlags_NavEnableGamepad;  // Enable Gamepad Controls
+
+        VkFormat                         colorFormat = VK_FORMAT_R16G16B16A16_SFLOAT;
+        VkPipelineRenderingCreateInfoKHR infoRendering{
+            .sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR,
+            .pNext                   = nullptr,
+            .viewMask                = 0,
+            .colorAttachmentCount    = 1,
+            .pColorAttachmentFormats = &colorFormat,
+            .depthAttachmentFormat   = VK_FORMAT_UNDEFINED,
+            .stencilAttachmentFormat = VK_FORMAT_UNDEFINED,
+        };
+
+        ImGui_ImplVulkan_InitInfo infoVulkan{
+            .ApiVersion                  = VK_API_VERSION_1_4,
+            .Instance                    = m_instance,
+            .PhysicalDevice              = m_physicalDevice,
+            .Device                      = m_device,
+            .QueueFamily                 = kQueueFamilyIndex,
+            .Queue                       = m_queue,
+            .DescriptorPool              = m_descriptorPool,
+            .RenderPass                  = VK_NULL_HANDLE,
+            .MinImageCount               = kMinSwapchainImage,
+            .ImageCount                  = m_swapchainCount,
+            .MSAASamples                 = VK_SAMPLE_COUNT_1_BIT,
+            .UseDynamicRendering         = true,
+            .PipelineRenderingCreateInfo = infoRendering,
+        };
+
+        ImGui_ImplVulkan_Init(&infoVulkan);
+        ImGui_ImplVulkan_CreateFontsTexture();
+    }
+
     // Scene targets
     {
         for (uint32_t i = 0; i < kMaxFramesInFlight; ++i) {
@@ -911,15 +998,15 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
         };
 
         const std::vector<TextureUpload> uploads{
-            {"../assets/source/Default_albedo.jpg", VK_FORMAT_R8G8B8A8_SRGB, &m_helmetAlbedo},
-            {"../assets/source/Default_AO.jpg", VK_FORMAT_R8G8B8A8_UNORM, &m_helmetAO},
-            {"../assets/source/Default_emissive.jpg", VK_FORMAT_R8G8B8A8_UNORM, &m_helmetEmissive},
+            {"../assets/source/Default_albedo.jpg",         VK_FORMAT_R8G8B8A8_SRGB,  &m_helmetAlbedo           },
+            {"../assets/source/Default_AO.jpg",             VK_FORMAT_R8G8B8A8_UNORM, &m_helmetAO               },
+            {"../assets/source/Default_emissive.jpg",       VK_FORMAT_R8G8B8A8_UNORM, &m_helmetEmissive         },
             {"../assets/source/Default_metalRoughness.jpg", VK_FORMAT_R8G8B8A8_UNORM, &m_helmetMetallicRoughness},
-            {"../assets/source/Default_normal.jpg", VK_FORMAT_R8G8B8A8_UNORM, &m_helmetNormal},
-            {"../assets/skybox/skybox.png", VK_FORMAT_R8G8B8A8_SRGB, &m_skyboxTexture},
-            {"../assets/skybox/skybox_irradiance.png", VK_FORMAT_R8G8B8A8_UNORM, &m_skyboxIrradiance},
-            {"../assets/skybox/skybox_specular.png", VK_FORMAT_R8G8B8A8_UNORM, &m_skyboxSpecular},
-            {"../assets/skybox/brdf_lut.png", VK_FORMAT_R8G8B8A8_UNORM, &m_brdfLut},
+            {"../assets/source/Default_normal.jpg",         VK_FORMAT_R8G8B8A8_UNORM, &m_helmetNormal           },
+            {"../assets/skybox/skybox.png",                 VK_FORMAT_R8G8B8A8_SRGB,  &m_skyboxTexture          },
+            {"../assets/skybox/skybox_irradiance.png",      VK_FORMAT_R8G8B8A8_UNORM, &m_skyboxIrradiance       },
+            {"../assets/skybox/skybox_specular.png",        VK_FORMAT_R8G8B8A8_UNORM, &m_skyboxSpecular         },
+            {"../assets/skybox/brdf_lut.png",               VK_FORMAT_R8G8B8A8_UNORM, &m_brdfLut                },
         };
 
         for (const TextureUpload &upload: uploads) {
@@ -1032,6 +1119,11 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
 
 VulkanState::~VulkanState() {
     WaitIdle();
+
+    ImGui_ImplVulkan_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
+    ImGui::DestroyContext();
+
     m_deletionQueue.Flush();
 }
 
@@ -1049,6 +1141,41 @@ void VulkanState::Run() {
 
     WaitAndRestFence(fence);
 
+    // CPU frame time
+    {
+        const auto                                     now   = std::chrono::high_resolution_clock::now();
+        const std::chrono::duration<float, std::milli> delta = now - m_lastFrameStart;
+        m_lastFrameTime                                      = delta.count();
+        m_lastFrameStart                                     = now;
+        m_frameTimeHistory[m_frameHistoryIndex]              = m_lastFrameTime;
+        m_frameHistoryIndex                                  = (m_frameHistoryIndex + 1) % kFrameHistorySize;
+    }
+
+    // Read back GPU timestamps from the frame that previously used this in-flight slot
+    if (m_totalFrameCount >= kMaxFramesInFlight) {
+        uint64_t       timestamps[2]{};
+        const VkResult result = vkGetQueryPoolResults(
+            m_device,
+            m_queryPool,
+            m_currentFrameIndex * 2,
+            2,
+            sizeof(timestamps),
+            timestamps,
+            sizeof(uint64_t),
+            VK_QUERY_RESULT_64_BIT
+        );
+        if (result == VK_SUCCESS) {
+            m_pbrTime = static_cast<float>(timestamps[1] - timestamps[0]) * m_timestampPeriod * 1e-6f;
+        }
+    }
+
+    // ImGui new frame
+    ImGui_ImplVulkan_NewFrame();
+    ImGui_ImplSDL3_NewFrame();
+    ImGui::NewFrame();
+    DrawImGuiContent();
+    ImGui::Render();
+
     // Swapchain acquire
     {
         VkResult result = vkAcquireNextImageKHR(m_device, m_swapchain, kPointOneSecond, presentSemaphore, VK_NULL_HANDLE, &m_presentImageIndex);
@@ -1060,6 +1187,8 @@ void VulkanState::Run() {
 
     ResetCommandBuffer(commandBuffer, 0);
     BeginCommandBuffer(commandBuffer, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+
+    vkCmdResetQueryPool(commandBuffer, m_queryPool, m_currentFrameIndex * 2, 2);
 
     // Transition scene targets for rendering
     {
@@ -1095,153 +1224,68 @@ void VulkanState::Run() {
         vkCmdPipelineBarrier2(commandBuffer, &dep);
     }
 
-    // Forward pipeline
+    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_queryPool, m_currentFrameIndex * 2);
+    ForwardPBR(commandBuffer, sceneColor, sceneDepth);
+    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_queryPool, m_currentFrameIndex * 2 + 1);
+
+    // Sync forward PBR writes before skybox reads/writes the same attachments
     {
-        VkRenderingAttachmentInfo colorAttachment{
-            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView   = sceneColor.view,
-            .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-            .clearValue  = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}},
+        std::vector<VkImageMemoryBarrier2> barriers{
+            VkImageMemoryBarrier2{
+                                  .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                  .srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  .srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                  .dstStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  .dstAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+                                  .oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  .newLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  .image            = sceneColor.image,
+                                  .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                                  },
+            VkImageMemoryBarrier2{
+                                  .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                  .srcStageMask     = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                                  .srcAccessMask    = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                                  .dstStageMask     = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT,
+                                  .dstAccessMask    = VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+                                  .oldLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                  .newLayout        = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+                                  .image            = sceneDepth.image,
+                                  .subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1},
+                                  },
         };
-        VkRenderingAttachmentInfo depthAttachment{
-            .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-            .imageView   = sceneDepth.view,
-            .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
-            .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-            .storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE,
-            .clearValue  = {.depthStencil = {1.0f, 0}},
+        VkDependencyInfo dep{
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size()),
+            .pImageMemoryBarriers    = barriers.data(),
         };
-        VkRenderingInfo infoRendering{
-            .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-            .renderArea           = {.offset = {0, 0}, .extent = m_swapchainExtent},
-            .layerCount           = 1,
-            .colorAttachmentCount = 1,
-            .pColorAttachments    = &colorAttachment,
-            .pDepthAttachment     = &depthAttachment,
-        };
-        vkCmdBeginRendering(commandBuffer, &infoRendering);
-
-        VkViewport viewport{
-            .x        = 0.0f,
-            .y        = 0.0f,
-            .width    = static_cast<float>(m_swapchainExtent.width),
-            .height   = static_cast<float>(m_swapchainExtent.height),
-            .minDepth = 0.0f,
-            .maxDepth = 1.0f,
-        };
-        vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
-
-        VkRect2D scissor{
-            .offset = {0, 0},
-            .extent = m_swapchainExtent,
-        };
-        vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
-
-        vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_forward.pipeline);
-
-        // Push constants
-        {
-            const glm::mat4 view = m_camera.GetViewMatrix();
-            const glm::mat4 proj = m_camera.GetProjectionMatrix();
-
-            m_globalUniforms.view        = view;
-            m_globalUniforms.proj        = proj;
-            m_globalUniforms.viewProj    = proj * view;
-            m_globalUniforms.viewInverse = glm::inverse(view);
-
-
-            vkCmdPushConstants(
-                commandBuffer,
-                m_forward.layout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0,
-                sizeof(shader_io::GlobalUniforms),
-                &m_globalUniforms
-            );
-        }
-
-        // Push descriptor sets
-        {
-            const std::vector<VkImageView> views{
-                m_helmetAlbedo.view,
-                m_helmetAO.view,
-                m_helmetEmissive.view,
-                m_helmetMetallicRoughness.view,
-                m_helmetNormal.view,
-                m_skyboxIrradiance.view,
-                m_skyboxSpecular.view,
-                m_brdfLut.view,
-            };
-            std::vector<VkDescriptorImageInfo> imageInfos(views.size());
-            std::vector<VkWriteDescriptorSet>  writes(views.size());
-            for (uint32_t i = 0; i < writes.size(); ++i) {
-                imageInfos[i] = VkDescriptorImageInfo{
-                    .sampler     = m_defaultSampler,
-                    .imageView   = views[i],
-                    .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                };
-                writes[i] = VkWriteDescriptorSet{
-                    .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .dstBinding      = i,
-                    .dstArrayElement = 0,
-                    .descriptorCount = 1,
-                    .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                    .pImageInfo      = &imageInfos[i],
-                };
-            }
-            vkCmdPushDescriptorSetKHR(
-                commandBuffer,
-                VK_PIPELINE_BIND_POINT_GRAPHICS,
-                m_forward.layout,
-                0,
-                static_cast<uint32_t>(writes.size()),
-                writes.data()
-            );
-        }
-
-        VkDeviceSize vertexOffset{0};
-        vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_helmetVertexBuffer.buffer, &vertexOffset);
-
-        vkCmdDraw(commandBuffer, m_helmetVertexBuffer.vertexCount, 1, 0, 0);
-
-        // Skybox pass
-        {
-            vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skybox.pipeline);
-
-            vkCmdPushConstants(
-                commandBuffer,
-                m_skybox.layout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                0,
-                sizeof(shader_io::GlobalUniforms),
-                &m_globalUniforms
-            );
-
-            const VkDescriptorImageInfo skyboxInfo{
-                .sampler     = m_defaultSampler,
-                .imageView   = m_skyboxTexture.view,
-                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-            };
-            const VkWriteDescriptorSet skyboxWrite{
-                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                .dstBinding      = 0,
-                .dstArrayElement = 0,
-                .descriptorCount = 1,
-                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                .pImageInfo      = &skyboxInfo,
-            };
-            vkCmdPushDescriptorSetKHR(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skybox.layout, 0, 1, &skyboxWrite);
-
-            VkDeviceSize skyboxOffset{0};
-            vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_skyboxVertexBuffer.buffer, &skyboxOffset);
-
-            vkCmdDraw(commandBuffer, m_skyboxVertexBuffer.vertexCount, 1, 0, 0);
-        }
-
-        vkCmdEndRendering(commandBuffer);
+        vkCmdPipelineBarrier2(commandBuffer, &dep);
     }
+
+    Skybox(commandBuffer, sceneColor, sceneDepth);
+
+    // Sync skybox writes before ImGui writes the color attachment
+    {
+        VkImageMemoryBarrier2 barrier{
+            .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+            .oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .newLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .image            = sceneColor.image,
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        };
+        VkDependencyInfo dep{
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers    = &barrier,
+        };
+        vkCmdPipelineBarrier2(commandBuffer, &dep);
+    }
+
+    ImGuiPass(commandBuffer, sceneColor);
 
     // Blit scene color to swapchain
     {
@@ -1333,6 +1377,7 @@ void VulkanState::Run() {
     }
 
     m_currentFrameIndex = (m_currentFrameIndex + 1) % kMaxFramesInFlight;
+    ++m_totalFrameCount;
 }
 
 void VulkanState::ResetCommandBuffer(const VkCommandBuffer &commandBuffer, VkCommandBufferResetFlags flags) {
@@ -1401,4 +1446,250 @@ VkExtent2D VulkanState::CalcSwapchainExtent(const VkSurfaceCapabilitiesKHR &capa
         };
     }
     return capabilities.currentExtent;
+}
+
+void VulkanState::ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) {
+    VkRenderingAttachmentInfo colorAttachment{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = sceneColor.view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue  = {.color = {{0.0f, 0.0f, 0.0f, 1.0f}}},
+    };
+    VkRenderingAttachmentInfo depthAttachment{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = sceneDepth.view,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+        .clearValue  = {.depthStencil = {1.0f, 0}},
+    };
+    VkRenderingInfo infoRendering{
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea           = {.offset = {0, 0}, .extent = m_swapchainExtent},
+        .layerCount           = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments    = &colorAttachment,
+        .pDepthAttachment     = &depthAttachment,
+    };
+    vkCmdBeginRendering(commandBuffer, &infoRendering);
+
+    VkViewport viewport{
+        .x        = 0.0f,
+        .y        = 0.0f,
+        .width    = static_cast<float>(m_swapchainExtent.width),
+        .height   = static_cast<float>(m_swapchainExtent.height),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{
+        .offset = {0, 0},
+        .extent = m_swapchainExtent,
+    };
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_forward.pipeline);
+
+    // Push constants
+    {
+        const glm::mat4 view = m_camera.GetViewMatrix();
+        const glm::mat4 proj = m_camera.GetProjectionMatrix();
+
+        m_globalUniforms.view        = view;
+        m_globalUniforms.proj        = proj;
+        m_globalUniforms.viewProj    = proj * view;
+        m_globalUniforms.viewInverse = glm::inverse(view);
+
+
+        vkCmdPushConstants(
+            commandBuffer,
+            m_forward.layout,
+            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+            0,
+            sizeof(shader_io::GlobalUniforms),
+            &m_globalUniforms
+        );
+    }
+
+    // Push descriptor sets
+    {
+        const std::vector<VkImageView> views{
+            m_helmetAlbedo.view,
+            m_helmetAO.view,
+            m_helmetEmissive.view,
+            m_helmetMetallicRoughness.view,
+            m_helmetNormal.view,
+            m_skyboxIrradiance.view,
+            m_skyboxSpecular.view,
+            m_brdfLut.view,
+        };
+        std::vector<VkDescriptorImageInfo> imageInfos(views.size());
+        std::vector<VkWriteDescriptorSet>  writes(views.size());
+        for (uint32_t i = 0; i < writes.size(); ++i) {
+            imageInfos[i] = VkDescriptorImageInfo{
+                .sampler     = m_defaultSampler,
+                .imageView   = views[i],
+                .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            };
+            writes[i] = VkWriteDescriptorSet{
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstBinding      = i,
+                .dstArrayElement = 0,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                .pImageInfo      = &imageInfos[i],
+            };
+        }
+        vkCmdPushDescriptorSetKHR(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_GRAPHICS,
+            m_forward.layout,
+            0,
+            static_cast<uint32_t>(writes.size()),
+            writes.data()
+        );
+    }
+
+    VkDeviceSize vertexOffset{0};
+    vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_helmetVertexBuffer.buffer, &vertexOffset);
+
+    vkCmdDraw(commandBuffer, m_helmetVertexBuffer.vertexCount, 1, 0, 0);
+
+    vkCmdEndRendering(commandBuffer);
+}
+
+void VulkanState::Skybox(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const {
+    VkRenderingAttachmentInfo colorAttachment{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = sceneColor.view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+    };
+    VkRenderingAttachmentInfo depthAttachment{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = sceneDepth.view,
+        .imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+    };
+    VkRenderingInfo infoRendering{
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea           = {.offset = {0, 0}, .extent = m_swapchainExtent},
+        .layerCount           = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments    = &colorAttachment,
+        .pDepthAttachment     = &depthAttachment,
+    };
+    vkCmdBeginRendering(commandBuffer, &infoRendering);
+
+    VkViewport viewport{
+        .x        = 0.0f,
+        .y        = 0.0f,
+        .width    = static_cast<float>(m_swapchainExtent.width),
+        .height   = static_cast<float>(m_swapchainExtent.height),
+        .minDepth = 0.0f,
+        .maxDepth = 1.0f,
+    };
+    vkCmdSetViewport(commandBuffer, 0, 1, &viewport);
+
+    VkRect2D scissor{
+        .offset = {0, 0},
+        .extent = m_swapchainExtent,
+    };
+    vkCmdSetScissor(commandBuffer, 0, 1, &scissor);
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skybox.pipeline);
+
+    vkCmdPushConstants(
+        commandBuffer,
+        m_skybox.layout,
+        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+        0,
+        sizeof(shader_io::GlobalUniforms),
+        &m_globalUniforms
+    );
+
+    const VkDescriptorImageInfo skyboxInfo{
+        .sampler     = m_defaultSampler,
+        .imageView   = m_skyboxTexture.view,
+        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+    };
+    const VkWriteDescriptorSet skyboxWrite{
+        .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+        .dstBinding      = 0,
+        .dstArrayElement = 0,
+        .descriptorCount = 1,
+        .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+        .pImageInfo      = &skyboxInfo,
+    };
+    vkCmdPushDescriptorSetKHR(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, m_skybox.layout, 0, 1, &skyboxWrite);
+
+    VkDeviceSize skyboxOffset{0};
+    vkCmdBindVertexBuffers(commandBuffer, 0, 1, &m_skyboxVertexBuffer.buffer, &skyboxOffset);
+
+    vkCmdDraw(commandBuffer, m_skyboxVertexBuffer.vertexCount, 1, 0, 0);
+
+    vkCmdEndRendering(commandBuffer);
+}
+
+void VulkanState::ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const {
+    VkRenderingAttachmentInfo colorAttachment{
+        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+        .imageView   = sceneColor.view,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
+        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+    };
+    VkRenderingInfo infoRendering{
+        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
+        .renderArea           = {.offset = {0, 0}, .extent = m_swapchainExtent},
+        .layerCount           = 1,
+        .colorAttachmentCount = 1,
+        .pColorAttachments    = &colorAttachment,
+    };
+    vkCmdBeginRendering(commandBuffer, &infoRendering);
+
+    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
+
+    vkCmdEndRendering(commandBuffer);
+}
+
+void VulkanState::DrawImGuiContent() {
+    if (ImGui::Begin("Debug Window")) {
+        if (ImGui::CollapsingHeader("Overall Performance", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Total Frame Time: %.3f ms", m_lastFrameTime);
+            ImGui::Text("FPS: %.1f", m_lastFrameTime > 0.0f ? 1000.0f / m_lastFrameTime : 0.0f);
+            ImGui::PlotLines(
+                "Frame Time History",
+                m_frameTimeHistory.data(),
+                static_cast<int>(m_frameTimeHistory.size()),
+                static_cast<int>(m_frameHistoryIndex),
+                nullptr,
+                0.0f,
+                33.3f,
+                ImVec2(0, 80)
+            );
+        }
+
+        if (ImGui::CollapsingHeader("Per-Pass Performance (GPU)", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::Text("Forward PBR: %.3f ms", m_pbrTime);
+
+            float values[] = {m_pbrTime};
+            ImGui::PlotHistogram(
+                "Compare (ms)",
+                values,
+                static_cast<int>(std::size(values)),
+                0,
+                nullptr,
+                0.0f,
+                std::max(m_pbrTime * 1.2f, 0.001f),
+                ImVec2(0, 80)
+            );
+        }
+    }
+    ImGui::End();
 }
