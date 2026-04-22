@@ -78,11 +78,7 @@ public:
     [[nodiscard]] const shader_io::MlpParams &GetMlpParams() const { return m_mlpParams; }
 
     [[nodiscard]] uint32_t             GetOutputResolution() const { return m_outputResolution; }
-    [[nodiscard]] const VulkanTexture &GetOutputAlbedo() const { return m_outAlbedo; }
-    [[nodiscard]] const VulkanTexture &GetOutputNormal() const { return m_outNormal; }
-    [[nodiscard]] const VulkanTexture &GetOutputAO() const { return m_outAO; }
-    [[nodiscard]] const VulkanTexture &GetOutputMetallicRoughness() const { return m_outMetallicRoughness; }
-    [[nodiscard]] const VulkanTexture &GetOutputEmissive() const { return m_outEmissive; }
+
 
 private:
     static constexpr const char *kMLPDir      = "../assets/export/runtime/";
@@ -105,11 +101,5 @@ private:
     shader_io::MlpParams m_mlpParams{};
 
 private:
-    // Reconstructed PBR outputs. Filled by VulkanState::ReconstructPass via a compute dispatch.
-    uint32_t      m_outputResolution{0};
-    VulkanTexture m_outAlbedo{};
-    VulkanTexture m_outNormal{};
-    VulkanTexture m_outAO{};
-    VulkanTexture m_outMetallicRoughness{};
-    VulkanTexture m_outEmissive{};
+    int32_t      m_outputResolution{0};
 };

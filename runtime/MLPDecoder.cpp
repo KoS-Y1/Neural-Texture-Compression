@@ -300,60 +300,6 @@ void MLPDecoder::Load(VulkanState &state) {
         vmaDestroyBuffer(state.GetAllocator(), stagingBuffer, stagingAllocation);
     }
 
-    // Reconstruct output
-    {
-        m_outputResolution = m_header.latentHi.width * kCompressionRatio;
-        DebugInfo("Reconstruct output resolution: {}x{}", m_outputResolution, m_outputResolution);
-
-        struct OutputCreate {
-            const char    *name;
-            VulkanTexture *texture;
-        };
-        const std::vector<OutputCreate> outputs{
-            {"outAlbedo",            &m_outAlbedo           },
-            {"outNormal",            &m_outNormal           },
-            {"outAO",                &m_outAO               },
-            {"outMetallicRoughness", &m_outMetallicRoughness},
-            {"outEmissive",          &m_outEmissive         },
-        };
-
-        constexpr VkFormat kOutputFormat = VK_FORMAT_R8G8B8A8_UNORM;
-
-        for (const OutputCreate &out: outputs) {
-            VkImageCreateInfo infoImage{
-                .sType       = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
-                .imageType   = VK_IMAGE_TYPE_2D,
-                .format      = kOutputFormat,
-                .extent      = {m_outputResolution, m_outputResolution, 1},
-                .mipLevels   = 1,
-                .arrayLayers = 1,
-                .samples     = VK_SAMPLE_COUNT_1_BIT,
-                .tiling      = VK_IMAGE_TILING_OPTIMAL,
-                          .usage         = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
-                .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
-                .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-            };
-            VmaAllocationCreateInfo infoAlloc{.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
-            VkResult                result = vmaCreateImage(
-                state.GetAllocator(), &infoImage, &infoAlloc, &out.texture->image, &out.texture->allocation, nullptr
-            );
-            DebugCheckCritical(result == VK_SUCCESS, "Failed to create reconstruct output image {}", out.name);
-            state.PushToDeletionQueue([tex = out.texture, &state]() {
-                vmaDestroyImage(state.GetAllocator(), tex->image, tex->allocation);
-            });
-
-            VkImageViewCreateInfo infoView{
-                .sType            = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
-                .image            = out.texture->image,
-                .viewType         = VK_IMAGE_VIEW_TYPE_2D,
-                .format           = kOutputFormat,
-                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
-            };
-            result = vkCreateImageView(state.GetDevice(), &infoView, nullptr, &out.texture->view);
-            DebugCheckCritical(result == VK_SUCCESS, "Failed to create reconstruct output view {}", out.name);
-            state.PushToDeletionQueue([tex = out.texture, &state]() {
-                vkDestroyImageView(state.GetDevice(), tex->view, nullptr);
-            });
-        }
-    }
+    m_outputResolution = m_header.latentHi.width * kCompressionRatio;
+    DebugInfo("Reconstruct output resolution: {}x{}", m_outputResolution, m_outputResolution);
 }

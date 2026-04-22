@@ -99,48 +99,9 @@ private:
     std::array<VkCommandBuffer, kMaxFramesInFlight> m_commandBuffers{};
     std::array<VkSemaphore, kMaxFramesInFlight>     m_presentSemaphores{};
     std::array<VkFence, kMaxFramesInFlight>         m_fences{};
-    std::array<VulkanTexture, kMaxFramesInFlight>   m_sceneColors{};
-    std::array<VulkanTexture, kMaxFramesInFlight>   m_sceneDepths{};
-    uint32_t                                        m_currentFrameIndex{0};
 
-    [[nodiscard]] VkExtent2D CalcSwapchainExtent(const VkSurfaceCapabilitiesKHR &capabilities) const;
+    uint32_t m_currentFrameIndex{0};
 
-    // Pipeline
-    struct VulkanPipeline {
-        VkPipelineLayout layout{};
-        VkPipeline       pipeline{};
-    };
-
-    VulkanPipeline        m_forward{};
-    VkDescriptorSetLayout m_forwardSetLayout{};
-    VulkanPipeline        m_skybox{};
-    VkDescriptorSetLayout m_skyboxSetLayout{};
-
-    VulkanPipeline m_reconstruct{};
-    VkDescriptorSetLayout m_reconstructSetLayout{};
-
-    VkDescriptorPool m_descriptorPool{};
-
-    void ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth);
-    void Skybox(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
-    void ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
-    void ReconstructPass();
-
-    // Profiling
-    static constexpr size_t kFrameHistorySize = 128;
-
-    VkQueryPool                                    m_queryPool{};
-    float                                          m_timestampPeriod{1.0f};
-    float                                          m_pbrTime{0.0f};
-    float                                          m_lastFrameTime{0.0f};
-    std::array<float, kFrameHistorySize>           m_frameTimeHistory{};
-    uint32_t                                       m_frameHistoryIndex{0};
-    uint64_t                                       m_totalFrameCount{0};
-    std::chrono::high_resolution_clock::time_point m_lastFrameStart{};
-
-    void DrawImGuiContent();
-
-private:
     // Commands
     static constexpr uint64_t kPointOneSecond = 100000000;
 
@@ -148,6 +109,29 @@ private:
     VkCommandBuffer m_immediateCommandBuffer{};
     VkFence         m_immediateFence{};
 
+    // Profiling
+    static constexpr size_t kFrameHistorySize = 128;
+
+    VkQueryPool                                    m_queryPool{};
+    float                                          m_timestampPeriod{1.0f};
+    float                                          m_pbrTime{0.0f};
+    float                                          m_computeReconstructTime{0.0f};
+    float                                          m_lastFrameTime{0.0f};
+
+    struct PsnrEntry {
+        const char *label{nullptr};
+        float       psnr{0.0f};
+    };
+    std::array<PsnrEntry, 5> m_perOutputPsnr{};
+    float                    m_overallPsnr{0.0f};
+
+    std::array<float, kFrameHistorySize>           m_frameTimeHistory{};
+    uint32_t                                       m_frameHistoryIndex{0};
+    uint64_t                                       m_totalFrameCount{0};
+    std::chrono::high_resolution_clock::time_point m_lastFrameStart{};
+
+
+    void InitState();
 
     static void ResetCommandBuffer(const VkCommandBuffer &commandBuffer, VkCommandBufferResetFlags flags);
     static void BeginCommandBuffer(const VkCommandBuffer &commandBuffer, VkCommandBufferUsageFlags flags);
@@ -162,6 +146,9 @@ private:
         const VkSemaphore     &signalSemaphore
     ) const;
 
+    [[nodiscard]] VkExtent2D CalcSwapchainExtent(const VkSurfaceCapabilitiesKHR &capabilities) const;
+
+
 private:
     // Resources
     struct VulkanVertexBuffer {
@@ -171,6 +158,9 @@ private:
     };
 
     VkSampler m_defaultSampler{};
+
+    std::array<VulkanTexture, kMaxFramesInFlight> m_sceneColors{};
+    std::array<VulkanTexture, kMaxFramesInFlight> m_sceneDepths{};
 
     VulkanVertexBuffer m_helmetVertexBuffer{};
     VulkanTexture      m_helmetAlbedo{};
@@ -186,6 +176,45 @@ private:
     VulkanTexture      m_brdfLut{};
 
     std::unique_ptr<MLPDecoder> m_mlp{};
+
+    VulkanTexture m_computeOutAlbedo{};
+    VulkanTexture m_computeOutNormal{};
+    VulkanTexture m_computeOutAO{};
+    VulkanTexture m_computeOutMetallicRoughness{};
+    VulkanTexture m_computeOutEmissive{};
+
+    // TODO: fragment out
+
+    void InitResources();
+
+private:
+    // Pipeline
+    struct VulkanPipeline {
+        VkPipelineLayout layout{};
+        VkPipeline       pipeline{};
+    };
+
+    VulkanPipeline        m_forward{};
+    VkDescriptorSetLayout m_forwardSetLayout{};
+    VulkanPipeline        m_skybox{};
+    VkDescriptorSetLayout m_skyboxSetLayout{};
+
+    VulkanPipeline        m_reconstruct{};
+    VkDescriptorSetLayout m_reconstructSetLayout{};
+
+    VkDescriptorPool m_descriptorPool{};
+
+    uint32_t m_passMode{0};
+
+    void InitPipelines();
+
+    void ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth);
+    void Skybox(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
+    void ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
+    void ReconstructComputePass();
+
+    void DrawImGuiContent();
+
 
 private:
     struct DeletionQueue {

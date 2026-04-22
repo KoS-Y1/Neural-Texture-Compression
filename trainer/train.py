@@ -20,7 +20,7 @@ ASSETS_LOAD_DIR = PROJECT_ROOT / "assets/source"
 ASSETS_EXPORT_DIR = PROJECT_ROOT / "assets/export"
 
 
-def train_ntc(texture_bundle: torch.Tensor, num_iter=20000, batch_size=65536, lr_latent=0.01, lr_mlp=0.005):
+def train_ntc(texture_bundle: torch.Tensor, num_iter=240000, batch_size=65536, lr_latent=0.01, lr_mlp=0.005):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     num_channels = texture_bundle.shape[0]  # Channels of the texture bundle
@@ -98,7 +98,6 @@ def train_ntc(texture_bundle: torch.Tensor, num_iter=20000, batch_size=65536, lr
     return latent_tex, mlp_decoder, pe
 
 
-
 def quantize_export(x, num_bits):
     """Hard quantization to integer codes for on-disk storage."""
     qmax = (2 ** num_bits) - 1
@@ -145,12 +144,12 @@ def _latent_to_interleaved_hwc(latent: torch.Tensor, num_bits: int) -> np.ndarra
 
 
 def export_runtime(
-    latent_tex: latent_texture.LatentTexture,
-    mlp_decoder: mlp.MlpDecoder,
-    pe: mlp.PositionalEncoder,
-    out_dir: Path,
-    hi_bits: int = 8,
-    lo_bits: int = 4,
+        latent_tex: latent_texture.LatentTexture,
+        mlp_decoder: mlp.MlpDecoder,
+        pe: mlp.PositionalEncoder,
+        out_dir: Path,
+        hi_bits: int = 8,
+        lo_bits: int = 4,
 ):
     """Export latent grids, MLP weights, and a JSON header for the C++ runtime.
 
@@ -193,12 +192,13 @@ def export_runtime(
     offset = 0
     for linear, activation in linear_layers:
         weight = linear.weight.detach().cpu().contiguous().half().numpy()  # [out, in]
-        bias = linear.bias.detach().cpu().contiguous().half().numpy()       # [out]
+        bias = linear.bias.detach().cpu().contiguous().half().numpy()  # [out]
 
         in_dim = weight.shape[1]
         padded_in = ((in_dim + COOP_VEC_ROW_ALIGN_ELEMS - 1) // COOP_VEC_ROW_ALIGN_ELEMS) * COOP_VEC_ROW_ALIGN_ELEMS
         if padded_in != in_dim:
-            weight = np.pad(weight, ((0, 0), (0, padded_in - in_dim)), mode="constant", constant_values=0).astype(np.float16)
+            weight = np.pad(weight, ((0, 0), (0, padded_in - in_dim)), mode="constant", constant_values=0).astype(
+                np.float16)
 
         weight_bytes = weight.tobytes()
         bias_bytes = bias.tobytes()
@@ -263,6 +263,7 @@ def export_runtime(
 
     with (out_dir / "ntc.json").open("w") as f:
         json.dump(header, f, indent=2)
+
 
 def reconstruct_texture(resolution, latent_tex, mlp_decoder, pe, device, mip_level=0.0, batch_size=65536):
     """Decompress the full texture by sampling all pixel UVs."""
@@ -338,7 +339,7 @@ def diff_image(orig: torch.Tensor, rec: torch.Tensor, amplify: float = 5.0) -> I
     return tensor_to_pil(diff.clamp(0, 1))
 
 
-def main(resolution=None, num_iter=10000):
+def main(resolution=None, num_iter=240000):
     ASSETS_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     paths = {
