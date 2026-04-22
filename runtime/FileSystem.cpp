@@ -14,14 +14,14 @@
 #include "Debug.h"
 
 namespace ntc {
-std::string Read(std::string_view dir) {
+std::vector<uint8_t> Read(std::string_view dir) {
     std::ifstream file(std::filesystem::path{dir}, std::ios::binary | std::ios::ate);
     DebugCheckCritical(file.is_open(), "Failed to open file {}", std::string(dir));
 
-    int64_t     fileSize = file.tellg();
-    std::string buf(fileSize, '\0');
+    int64_t              fileSize = file.tellg();
+    std::vector<uint8_t> buf(static_cast<size_t>(fileSize));
     file.seekg(0, std::ios::beg);
-    file.read(&buf[0], fileSize);
+    file.read(reinterpret_cast<char *>(buf.data()), fileSize);
     file.close();
 
     return buf;
@@ -113,13 +113,14 @@ std::vector<VertexData> LoadMesh(std::string_view dir) {
     return vertices;
 }
 
-unsigned char *LoadImage(std::string_view dir, int &width, int &height) {
+unsigned char *LoadImage(std::string_view dir, int &width, int &height, bool flipVertical) {
     int channels;
-    stbi_set_flip_vertically_on_load(true);
-    unsigned char *data = stbi_load(std::string(dir).c_str(), &width, &height, &channels, STBI_rgb_alpha);
-    DebugCheckCritical(data != nullptr, "Failed to load image {}", dir);
+    stbi_set_flip_vertically_on_load(flipVertical);
+    unsigned char *image = stbi_load(std::string(dir).c_str(), &width, &height, &channels, STBI_rgb_alpha);
+    DebugCheckCritical(image != nullptr, "Failed to load image {}", dir);
 
-    return data;
+    return image;
 }
+
 
 } // namespace ntc

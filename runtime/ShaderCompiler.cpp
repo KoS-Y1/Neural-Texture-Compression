@@ -86,7 +86,8 @@ bool ShaderCompiler::Compile(const std::string &filePath) {
     std::filesystem::path path{filePath};
     const std::string     fileName    = path.filename().string();
     const std::string     moduleName  = path.stem().string();
-    const std::string     slangSource = ntc::Read(filePath);
+    const std::vector<uint8_t> sourceBytes = ntc::Read(filePath);
+    const std::string          slangSource(reinterpret_cast<const char *>(sourceBytes.data()), sourceBytes.size());
 
     Slang::ComPtr<slang::IBlob> diagnostics;
 

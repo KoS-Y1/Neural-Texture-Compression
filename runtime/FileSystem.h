@@ -2,15 +2,17 @@
 // Created by y1 on 2026-04-18.
 //
 
-#pragma once 
+#pragma once
 
+#include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
 #include <glm/glm.hpp>
 
 namespace ntc {
-std::string Read(std::string_view dir);
+std::vector<uint8_t> Read(std::string_view dir);
 
 // Mesh
 struct VertexData {
@@ -23,5 +25,5 @@ struct VertexData {
 std::vector<VertexData> LoadMesh(std::string_view dir);
 
 // Image
-unsigned char *LoadImage(std::string_view dir, int &width, int &height);
-}
+unsigned char *LoadImage(std::string_view dir, int &width, int &height, bool flipVertical = true);
+} // namespace ntc

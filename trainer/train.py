@@ -98,15 +98,6 @@ def train_ntc(texture_bundle: torch.Tensor, num_iter=20000, batch_size=65536, lr
     return latent_tex, mlp_decoder, pe
 
 
-def quantize_ste(x, num_bits=8):
-    """Quantization with straight-through estimator (used during training)."""
-    qmax = (2 ** num_bits) - 1
-
-    x_clamped = torch.clamp(x, 0, 1)
-    x_quant = torch.round(x_clamped * qmax) / qmax
-
-    return x_clamped + (x_quant - x_clamped).detach()
-
 
 def quantize_export(x, num_bits):
     """Hard quantization to integer codes for on-disk storage."""
@@ -168,7 +159,7 @@ def export_runtime(
         ntc.json        -- config, layer shapes, byte offsets
         latent_hi.bin   -- uint8, row-major [H, W, C], UNORM-ready
         latent_lo.bin   -- uint8, row-major [H, W, C], UNORM-ready
-        mlp.bin         -- float32, concatenated Linear layers in forward order,
+        mlp.bin         -- float16, concatenated Linear layers in forward order,
                            each layer stored as weight [out, in] row-major then
                            bias [out].
     """
@@ -193,12 +184,21 @@ def export_runtime(
             activation = _activation_name(modules[i + 1]) if i + 1 < len(modules) else "none"
             linear_layers.append((m, activation))
 
+    # Cooperative vector row-major matrices require each row to be a multiple of 16 bytes;
+    # pad any FP16 layer whose input count isn't a multiple of 8 with zero columns.
+    COOP_VEC_ROW_ALIGN_ELEMS = 8
+
     mlp_buffers: list[bytes] = []
     mlp_layers_meta = []
     offset = 0
     for linear, activation in linear_layers:
-        weight = linear.weight.detach().cpu().contiguous().float().numpy()  # [out, in]
-        bias = linear.bias.detach().cpu().contiguous().float().numpy()       # [out]
+        weight = linear.weight.detach().cpu().contiguous().half().numpy()  # [out, in]
+        bias = linear.bias.detach().cpu().contiguous().half().numpy()       # [out]
+
+        in_dim = weight.shape[1]
+        padded_in = ((in_dim + COOP_VEC_ROW_ALIGN_ELEMS - 1) // COOP_VEC_ROW_ALIGN_ELEMS) * COOP_VEC_ROW_ALIGN_ELEMS
+        if padded_in != in_dim:
+            weight = np.pad(weight, ((0, 0), (0, padded_in - in_dim)), mode="constant", constant_values=0).astype(np.float16)
 
         weight_bytes = weight.tobytes()
         bias_bytes = bias.tobytes()
@@ -252,7 +252,7 @@ def export_runtime(
         },
         "mlp": {
             "file": "mlp.bin",
-            "dtype": "float32",
+            "dtype": "float16",
             "weight_layout": "row_major_out_in",
             "input_dim": input_dim,
             "output_dim": output_dim,
@@ -263,14 +263,6 @@ def export_runtime(
 
     with (out_dir / "ntc.json").open("w") as f:
         json.dump(header, f, indent=2)
-
-
-def decompress_texel(uv, mip_level, latent_tex, mlp_decoder, pe):
-    feat = latent_tex.sample(uv)
-    pe_feat = pe(uv)
-    mip_norm = torch.tensor([[mip_level]], device=uv.device)
-    return mlp_decoder(feat, pe_feat, mip_norm)
-
 
 def reconstruct_texture(resolution, latent_tex, mlp_decoder, pe, device, mip_level=0.0, batch_size=65536):
     """Decompress the full texture by sampling all pixel UVs."""
@@ -353,6 +345,7 @@ def main(resolution=None, num_iter=10000):
         'base_color': str(ASSETS_LOAD_DIR / "Default_albedo.jpg"),
         'normal': str(ASSETS_LOAD_DIR / "Default_normal.jpg"),
         'ao': str(ASSETS_LOAD_DIR / "Default_AO.jpg"),
+        'metal_roughness': str(ASSETS_LOAD_DIR / "Default_metalRoughness.jpg"),
         'emissive': str(ASSETS_LOAD_DIR / "Default_emissive.jpg"),
     }
 
@@ -382,7 +375,8 @@ def main(resolution=None, num_iter=10000):
         ('base_color', 0, 3),
         ('normal', 3, 6),
         ('ao', 6, 9),
-        ('emissive', 9, 12),
+        ('metal_roughness', 9, 12),
+        ('emissive', 12, 15),
     ]
 
     # Latent visualization (shared across rows)

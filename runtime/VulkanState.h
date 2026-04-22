@@ -8,8 +8,8 @@
 #include <chrono>
 #include <deque>
 #include <functional>
-#include <vk_mem_alloc.h>
 
+#include <vk_mem_alloc.h>
 #include <vulkan/vulkan.h>
 
 #include "global_io.slang"
@@ -17,6 +17,13 @@
 struct SDL_Window;
 
 class Camera;
+class MLPDecoder;
+
+struct VulkanTexture {
+    VkImage       image{};
+    VkImageView   view{};
+    VmaAllocation allocation{};
+};
 
 class VulkanState {
 public:
@@ -32,6 +39,27 @@ public:
 
     void WaitIdle() const;
     void Run();
+
+    template<class Func>
+    void ImmediateSubmit(Func &&func) {
+        ResetCommandBuffer(m_immediateCommandBuffer, 0);
+
+        BeginCommandBuffer(m_immediateCommandBuffer, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
+        func(m_immediateCommandBuffer);
+        EndCommandBuffer(m_immediateCommandBuffer);
+
+        SubmitToQueue(m_immediateCommandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, m_immediateFence, VK_NULL_HANDLE, VK_NULL_HANDLE);
+
+        WaitAndRestFence(m_immediateFence);
+    }
+
+    void PushToDeletionQueue(std::function<void()> &&func) { m_deletionQueue.Push(std::move(func)); }
+
+    [[nodiscard]] VkDevice GetDevice() const { return m_device; }
+
+    [[nodiscard]] VmaAllocator GetAllocator() const { return m_allocator; }
+
+public:
 
 
 private:
@@ -51,12 +79,6 @@ private:
     VkQueue                  m_queue{};
 
     // Present
-    struct VulkanTexture {
-        VkImage       image{};
-        VkImageView   view{};
-        VmaAllocation allocation{};
-    };
-
     static constexpr VkFormat         kPresentFormat{VK_FORMAT_B8G8R8A8_SRGB};
     static constexpr VkColorSpaceKHR  kPresentColorSpace{VK_COLOR_SPACE_SRGB_NONLINEAR_KHR};
     static constexpr VkPresentModeKHR kPresentMode{VK_PRESENT_MODE_FIFO_KHR};
@@ -81,7 +103,6 @@ private:
     std::array<VulkanTexture, kMaxFramesInFlight>   m_sceneDepths{};
     uint32_t                                        m_currentFrameIndex{0};
 
-
     [[nodiscard]] VkExtent2D CalcSwapchainExtent(const VkSurfaceCapabilitiesKHR &capabilities) const;
 
     // Pipeline
@@ -94,13 +115,16 @@ private:
     VkDescriptorSetLayout m_forwardSetLayout{};
     VulkanPipeline        m_skybox{};
     VkDescriptorSetLayout m_skyboxSetLayout{};
-    VkSampler             m_defaultSampler{};
+
+    VulkanPipeline m_reconstruct{};
+    VkDescriptorSetLayout m_reconstructSetLayout{};
 
     VkDescriptorPool m_descriptorPool{};
 
     void ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth);
     void Skybox(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
     void ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
+    void ReconstructPass();
 
     // Profiling
     static constexpr size_t kFrameHistorySize = 128;
@@ -124,18 +148,6 @@ private:
     VkCommandBuffer m_immediateCommandBuffer{};
     VkFence         m_immediateFence{};
 
-    template<class Func>
-    void ImmediateSubmit(Func &&func) {
-        ResetCommandBuffer(m_immediateCommandBuffer, 0);
-
-        BeginCommandBuffer(m_immediateCommandBuffer, VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT);
-        func(m_immediateCommandBuffer);
-        EndCommandBuffer(m_immediateCommandBuffer);
-
-        SubmitToQueue(m_immediateCommandBuffer, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, m_immediateFence, VK_NULL_HANDLE, VK_NULL_HANDLE);
-
-        WaitAndRestFence(m_immediateFence);
-    }
 
     static void ResetCommandBuffer(const VkCommandBuffer &commandBuffer, VkCommandBufferResetFlags flags);
     static void BeginCommandBuffer(const VkCommandBuffer &commandBuffer, VkCommandBufferUsageFlags flags);
@@ -158,6 +170,8 @@ private:
         VmaAllocation allocation{};
     };
 
+    VkSampler m_defaultSampler{};
+
     VulkanVertexBuffer m_helmetVertexBuffer{};
     VulkanTexture      m_helmetAlbedo{};
     VulkanTexture      m_helmetAO{};
@@ -171,6 +185,7 @@ private:
     VulkanTexture      m_skyboxSpecular{};
     VulkanTexture      m_brdfLut{};
 
+    std::unique_ptr<MLPDecoder> m_mlp{};
 
 private:
     struct DeletionQueue {

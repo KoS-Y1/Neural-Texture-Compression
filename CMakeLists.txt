@@ -40,6 +40,8 @@ add_executable(NTC
         runtime/ShaderCompiler.h
         runtime/Camera.cpp
         runtime/Camera.h
+        runtime/MLPDecoder.cpp
+        runtime/MLPDecoder.h
 )
 
 target_include_directories(NTC PRIVATE ${Stb_INCLUDE_DIR})

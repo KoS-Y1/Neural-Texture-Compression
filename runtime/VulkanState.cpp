@@ -5,6 +5,7 @@
 #include "VulkanState.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <limits>
 #include <vector>
@@ -19,7 +20,22 @@
 #include "Camera.h"
 #include "Debug.h"
 #include "FileSystem.h"
+#include "MLPDecoder.h"
 #include "ShaderCompiler.h"
+
+namespace {
+double CalcualtePSNR(const uint8_t *src, const uint8_t *rec, size_t pixelCount) {
+    double mse = 0.0;
+    for (size_t i = 0; i < pixelCount; ++i) {
+        for (uint32_t c = 0; c < 3; ++c) {
+            const double d  = (static_cast<double>(src[i * 4 + c]) - static_cast<double>(rec[i * 4 + c])) / 255.0;
+            mse            += d * d;
+        }
+    }
+    mse /= static_cast<double>(pixelCount * 3);
+    return mse > 0.0 ? -10.0 * std::log10(mse) : std::numeric_limits<double>::infinity();
+}
+} // namespace
 
 static VKAPI_ATTR VkBool32 VKAPI_CALL VulkanDebugCallback(
     [[maybe_unused]] VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
@@ -159,20 +175,42 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
             VK_KHR_CREATE_RENDERPASS_2_EXTENSION_NAME,
             VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
             VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
+            VK_NV_COOPERATIVE_VECTOR_EXTENSION_NAME,
+            VK_EXT_SHADER_REPLICATED_COMPOSITES_EXTENSION_NAME,
+        };
+
+
+        VkPhysicalDeviceShaderReplicatedCompositesFeaturesEXT shaderRepFeatures{
+            .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_REPLICATED_COMPOSITES_FEATURES_EXT,
+            .pNext = nullptr,
+            .shaderReplicatedComposites =  VK_TRUE
+        };
+
+        VkPhysicalDeviceCooperativeVectorFeaturesNV coopVecFeatures{
+            .sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_VECTOR_FEATURES_NV,
+            .pNext             = &shaderRepFeatures ,
+            .cooperativeVector = VK_TRUE
         };
 
         VkPhysicalDeviceVulkan13Features feature13{
             .sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
-            .pNext            = nullptr,
+            .pNext            = &coopVecFeatures,
             .synchronization2 = VK_TRUE,
             .dynamicRendering = VK_TRUE,
+        };
+
+        VkPhysicalDeviceVulkan12Features feature12{
+            .sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+            .pNext             = &feature13,
+            .shaderFloat16     = VK_TRUE,
+            .vulkanMemoryModel = VK_TRUE,
         };
 
         VkPhysicalDeviceFeatures features{};
 
         VkDeviceCreateInfo infoDevice{
             .sType                   = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-            .pNext                   = &feature13,
+            .pNext                   = &feature12,
             .queueCreateInfoCount    = 1,
             .pQueueCreateInfos       = &infoQueue,
             .enabledExtensionCount   = static_cast<uint32_t>(extensions.size()),
@@ -410,6 +448,28 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
         VkResult result = vkCreateDescriptorSetLayout(m_device, &infoSetLayout, nullptr, &m_skyboxSetLayout);
         DebugCheckCritical(result == VK_SUCCESS, "Failed to create skybox descriptor set layout");
         m_deletionQueue.Push([&]() { vkDestroyDescriptorSetLayout(m_device, m_skyboxSetLayout, nullptr); });
+    }
+
+    // Reconstruct descriptor set layout
+    {
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        bindings.reserve(8);
+        bindings.push_back({0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+        bindings.push_back({1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+        bindings.push_back({2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+        for (uint32_t i = 3; i <= 7; ++i) {
+            bindings.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr});
+        }
+
+        const VkDescriptorSetLayoutCreateInfo infoSetLayout{
+            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+            .bindingCount = static_cast<uint32_t>(bindings.size()),
+            .pBindings    = bindings.data(),
+        };
+        VkResult result = vkCreateDescriptorSetLayout(m_device, &infoSetLayout, nullptr, &m_reconstructSetLayout);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create reconstruct descriptor set layout");
+        m_deletionQueue.Push([&]() { vkDestroyDescriptorSetLayout(m_device, m_reconstructSetLayout, nullptr); });
     }
 
     // Forward pipeline
@@ -742,6 +802,57 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
         vkDestroyShaderModule(m_device, shaderModule, nullptr);
     }
 
+    // Reconstruct pipeline
+    {
+        const VkPushConstantRange pushConstantRange{
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .offset     = 0,
+            .size       = sizeof(shader_io::ReconstructParams),
+        };
+        const VkPipelineLayoutCreateInfo infoLayout{
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount         = 1,
+            .pSetLayouts            = &m_reconstructSetLayout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges    = &pushConstantRange,
+        };
+        VkResult result = vkCreatePipelineLayout(m_device, &infoLayout, nullptr, &m_reconstruct.layout);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create reconstruct pipeline layout");
+        m_deletionQueue.Push([&]() { vkDestroyPipelineLayout(m_device, m_reconstruct.layout, nullptr); });
+
+        constexpr const char *kReconstructDir = "../runtime/shaders/reconstruct.slang";
+
+        VkShaderModuleCreateInfo infoShaderModule{
+            .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = shaderCompiler.GetSpirvSize(kReconstructDir),
+            .pCode    = shaderCompiler.GetSpirv(kReconstructDir),
+        };
+        VkShaderModule shaderModule{};
+        result = vkCreateShaderModule(m_device, &infoShaderModule, nullptr, &shaderModule);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create shader module for {}", kReconstructDir);
+
+        std::vector<std::pair<std::string, VkShaderStageFlagBits>> entryPoints = shaderCompiler.GetEntryPoints(kReconstructDir);
+        DebugCheckCritical(entryPoints.size() == 1, "Reconstruct shader must have exactly one entry point");
+
+        VkPipelineShaderStageCreateInfo infoStage{
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = entryPoints[0].second,
+            .module = shaderModule,
+            .pName  = entryPoints[0].first.c_str(),
+        };
+
+        VkComputePipelineCreateInfo infoPipeline{
+            .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage  = infoStage,
+            .layout = m_reconstruct.layout,
+        };
+        result = vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &infoPipeline, nullptr, &m_reconstruct.pipeline);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create reconstruct compute pipeline");
+        m_deletionQueue.Push([&]() { vkDestroyPipeline(m_device, m_reconstruct.pipeline, nullptr); });
+
+        vkDestroyShaderModule(m_device, shaderModule, nullptr);
+    }
+
     // Descriptor pool for ImGui
     {
         const std::vector<VkDescriptorPoolSize> poolSizes{
@@ -931,7 +1042,7 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
 
     // Load skybox mesh
     {
-        const std::vector<glm::vec3> skyboxVertices{
+        constexpr std::array<glm::vec3, 14> skyboxVertices{
             glm::vec3(-1.0f, 1.0f, 1.0f),
             glm::vec3(1.0f, 1.0f, 1.0f),
             glm::vec3(-1.0f, -1.0f, 1.0f),
@@ -999,10 +1110,10 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
 
         const std::vector<TextureUpload> uploads{
             {"../assets/source/Default_albedo.jpg",         VK_FORMAT_R8G8B8A8_SRGB,  &m_helmetAlbedo           },
-            {"../assets/source/Default_AO.jpg",             VK_FORMAT_R8G8B8A8_UNORM, &m_helmetAO               },
-            {"../assets/source/Default_emissive.jpg",       VK_FORMAT_R8G8B8A8_UNORM, &m_helmetEmissive         },
-            {"../assets/source/Default_metalRoughness.jpg", VK_FORMAT_R8G8B8A8_UNORM, &m_helmetMetallicRoughness},
             {"../assets/source/Default_normal.jpg",         VK_FORMAT_R8G8B8A8_UNORM, &m_helmetNormal           },
+            {"../assets/source/Default_AO.jpg",             VK_FORMAT_R8G8B8A8_UNORM, &m_helmetAO               },
+            {"../assets/source/Default_metalRoughness.jpg", VK_FORMAT_R8G8B8A8_UNORM, &m_helmetMetallicRoughness},
+            {"../assets/source/Default_emissive.jpg",       VK_FORMAT_R8G8B8A8_UNORM, &m_helmetEmissive         },
             {"../assets/skybox/skybox.png",                 VK_FORMAT_R8G8B8A8_SRGB,  &m_skyboxTexture          },
             {"../assets/skybox/skybox_irradiance.png",      VK_FORMAT_R8G8B8A8_UNORM, &m_skyboxIrradiance       },
             {"../assets/skybox/skybox_specular.png",        VK_FORMAT_R8G8B8A8_UNORM, &m_skyboxSpecular         },
@@ -1115,6 +1226,115 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
             m_deletionQueue.Push([this, texture]() { vkDestroyImageView(m_device, texture->view, nullptr); });
         }
     }
+
+    m_mlp = std::make_unique<MLPDecoder>();
+    m_mlp->Load(*this);
+
+    ReconstructPass();
+
+    // Calculate per-output PSNR by reading back each reconstructed image and comparing to its source JPG.
+    {
+        struct OutputCompare {
+            const VulkanTexture *texture;
+            const char          *sourcePath;
+            const char          *label;
+        };
+
+        const std::vector<OutputCompare> compares{
+            {&m_mlp->GetOutputAlbedo(),            "../assets/source/Default_albedo.jpg",         "albedo"        },
+            {&m_mlp->GetOutputNormal(),            "../assets/source/Default_normal.jpg",         "normal"        },
+            {&m_mlp->GetOutputAO(),                "../assets/source/Default_AO.jpg",             "ao"            },
+            {&m_mlp->GetOutputMetallicRoughness(), "../assets/source/Default_metalRoughness.jpg", "metalRoughness"},
+            {&m_mlp->GetOutputEmissive(),          "../assets/source/Default_emissive.jpg",       "emissive"      },
+        };
+
+        const uint32_t     res     = m_mlp->GetOutputResolution();
+        const VkDeviceSize bufSize = static_cast<VkDeviceSize>(res) * static_cast<VkDeviceSize>(res) * 4;
+
+        for (const OutputCompare &cmp: compares) {
+            // Host-visible staging buffer to receive the GPU image.
+            VkBufferCreateInfo infoStaging{
+                .sType       = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                .size        = bufSize,
+                .usage       = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+            };
+            VmaAllocationCreateInfo infoAlloc{
+                .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
+                .usage = VMA_MEMORY_USAGE_AUTO,
+            };
+            VkBuffer          staging{};
+            VmaAllocation     stagingAlloc{};
+            VmaAllocationInfo stagingInfo{};
+            VkResult          result = vmaCreateBuffer(m_allocator, &infoStaging, &infoAlloc, &staging, &stagingAlloc, &stagingInfo);
+            DebugCheckCritical(result == VK_SUCCESS, "Failed to create PSNR staging buffer for {}", cmp.label);
+
+            // Transition SHADER_READ_ONLY -> TRANSFER_SRC, copy to staging, restore SHADER_READ_ONLY.
+            ImmediateSubmit([&](VkCommandBuffer cmdBuf) {
+                VkImageMemoryBarrier2 toSrc{
+                    .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                    .srcStageMask     = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                    .srcAccessMask    = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                    .dstStageMask     = VK_PIPELINE_STAGE_2_COPY_BIT,
+                    .dstAccessMask    = VK_ACCESS_2_TRANSFER_READ_BIT,
+                    .oldLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    .newLayout        = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    .image            = cmp.texture->image,
+                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                };
+                VkDependencyInfo dep1{
+                    .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                    .imageMemoryBarrierCount = 1,
+                    .pImageMemoryBarriers    = &toSrc,
+                };
+                vkCmdPipelineBarrier2(cmdBuf, &dep1);
+
+                VkBufferImageCopy region{
+                    .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                    .imageExtent      = {res, res, 1},
+                };
+                vkCmdCopyImageToBuffer(cmdBuf, cmp.texture->image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1, &region);
+
+                VkImageMemoryBarrier2 toRead{
+                    .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                    .srcStageMask     = VK_PIPELINE_STAGE_2_COPY_BIT,
+                    .srcAccessMask    = VK_ACCESS_2_TRANSFER_READ_BIT,
+                    .dstStageMask     = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                    .dstAccessMask    = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                    .oldLayout        = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                    .image            = cmp.texture->image,
+                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                };
+                VkDependencyInfo dep2{
+                    .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                    .imageMemoryBarrierCount = 1,
+                    .pImageMemoryBarriers    = &toRead,
+                };
+                vkCmdPipelineBarrier2(cmdBuf, &dep2);
+            });
+
+            // Load source pixels on CPU and compare. Skip cleanly if resolutions don't match.
+            int            srcW{0};
+            int            srcH{0};
+            
+            // No need to flip original image for comparison
+            unsigned char *srcPixels = ntc::LoadImage(cmp.sourcePath, srcW, srcH, false);
+            DebugCheckCritical(srcPixels != nullptr, "Failed to load source for PSNR: {}", cmp.sourcePath);
+
+            if (static_cast<uint32_t>(srcW) != res || static_cast<uint32_t>(srcH) != res) {
+                DebugInfo("PSNR {}: source {}x{} vs reconstructed {}x{} — resolution mismatch, skipping", cmp.label, srcW, srcH, res, res);
+            } else {
+                const uint8_t *recPixels = static_cast<const uint8_t *>(stagingInfo.pMappedData);
+                const size_t   pixels    = static_cast<size_t>(res) * static_cast<size_t>(res);
+                const double   psnr      = CalcualtePSNR(srcPixels, recPixels, pixels);
+                DebugInfo("PSNR {:>15s}: {:.2f} dB", cmp.label, psnr);
+            }
+
+            stbi_image_free(srcPixels);
+            vmaDestroyBuffer(m_allocator, staging, stagingAlloc);
+        }
+    }
 }
 
 VulkanState::~VulkanState() {
@@ -1224,9 +1444,9 @@ void VulkanState::Run() {
         vkCmdPipelineBarrier2(commandBuffer, &dep);
     }
 
-    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, m_queryPool, m_currentFrameIndex * 2);
+    vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_NONE, m_queryPool, m_currentFrameIndex * 2);
     ForwardPBR(commandBuffer, sceneColor, sceneDepth);
-    vkCmdWriteTimestamp(commandBuffer, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, m_queryPool, m_currentFrameIndex * 2 + 1);
+    vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, m_queryPool, m_currentFrameIndex * 2 + 1);
 
     // Sync forward PBR writes before skybox reads/writes the same attachments
     {
@@ -1376,6 +1596,8 @@ void VulkanState::Run() {
         DebugCheckCritical(result == VK_SUCCESS, "Failed to present");
     }
 
+    ReconstructPass();
+
     m_currentFrameIndex = (m_currentFrameIndex + 1) % kMaxFramesInFlight;
     ++m_totalFrameCount;
 }
@@ -1518,10 +1740,10 @@ void VulkanState::ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanT
     {
         const std::vector<VkImageView> views{
             m_helmetAlbedo.view,
-            m_helmetAO.view,
-            m_helmetEmissive.view,
-            m_helmetMetallicRoughness.view,
             m_helmetNormal.view,
+            m_helmetAO.view,
+            m_helmetMetallicRoughness.view,
+            m_helmetEmissive.view,
             m_skyboxIrradiance.view,
             m_skyboxSpecular.view,
             m_brdfLut.view,
@@ -1656,6 +1878,142 @@ void VulkanState::ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTe
     ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), commandBuffer);
 
     vkCmdEndRendering(commandBuffer);
+}
+
+void VulkanState::ReconstructPass() {
+    const uint32_t res = m_mlp->GetOutputResolution();
+    DebugCheckCritical(res > 0, "MLP output resolution is zero");
+
+    shader_io::ReconstructParams pc{};
+    pc.mlpParams    = m_mlp->GetMlpParams();
+    pc.outputWidth  = res;
+    pc.outputHeight = res;
+    pc.mipNorm      = 0.0f; // Reconstruct mip 0 (matches training when mip_idx == 0)
+
+    const std::vector<const VulkanTexture *> outputs{
+        &m_mlp->GetOutputAlbedo(),
+        &m_mlp->GetOutputNormal(),
+        &m_mlp->GetOutputAO(),
+        &m_mlp->GetOutputMetallicRoughness(),
+        &m_mlp->GetOutputEmissive(),
+    };
+
+    ImmediateSubmit([&](VkCommandBuffer cmd) {
+        std::vector<VkImageMemoryBarrier2> toGeneral{};
+        toGeneral.reserve(outputs.size());
+        for (const auto &output: outputs) {
+            VkImageMemoryBarrier2 barrier{
+                .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask     = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .dstAccessMask    = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED,
+                .newLayout        = VK_IMAGE_LAYOUT_GENERAL,
+                .image            = output->image,
+                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+            };
+            toGeneral.push_back(barrier);
+        }
+        VkDependencyInfo depToGeneral{
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = static_cast<uint32_t>(toGeneral.size()),
+            .pImageMemoryBarriers    = toGeneral.data(),
+        };
+        vkCmdPipelineBarrier2(cmd, &depToGeneral);
+
+        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_reconstruct.pipeline);
+
+        // Push descriptors: latents (0,1) + mlp buffer (2) + output images (3..7)
+        const VkDescriptorImageInfo loInfo{
+            .sampler     = m_mlp->GetSampler(),
+            .imageView   = m_mlp->GetLatentLo().view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo hiInfo{
+            .sampler     = m_mlp->GetSampler(),
+            .imageView   = m_mlp->GetLatentHi().view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorBufferInfo mlpInfo{
+            .buffer = m_mlp->GetMlpBuffer(),
+            .offset = 0,
+            .range  = VK_WHOLE_SIZE,
+        };
+        std::vector<VkDescriptorImageInfo> outInfos{};
+        outInfos.reserve(outputs.size());
+        for (const auto &output: outputs) {
+            VkDescriptorImageInfo info{
+                .imageView   = output->view,
+                .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            };
+            outInfos.push_back(info);
+        }
+
+
+        std::vector<VkWriteDescriptorSet> writes{8};
+        writes[0] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &loInfo,
+        };
+        writes[1] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 1,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &hiInfo,
+        };
+        writes[2] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 2,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo     = &mlpInfo,
+        };
+
+        for (uint32_t i = 0; i < 5; ++i) {
+            writes[3 + i] = {
+                .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                .dstBinding      = 3 + i,
+                .descriptorCount = 1,
+                .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+                .pImageInfo      = &outInfos[i],
+            };
+        }
+
+        vkCmdPushDescriptorSetKHR(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, m_reconstruct.layout, 0, static_cast<uint32_t>(writes.size()), writes.data());
+
+        vkCmdPushConstants(cmd, m_reconstruct.layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(shader_io::ReconstructParams), &pc);
+
+        const uint32_t gx = (res + 7) / 8;
+        const uint32_t gy = (res + 7) / 8;
+        vkCmdDispatch(cmd, gx, gy, 1);
+
+        std::vector<VkImageMemoryBarrier2> toRead{};
+        toRead.reserve(outputs.size());
+        for (const auto &output: outputs) {
+            VkImageMemoryBarrier2 barrier{
+                .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                .srcStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                .srcAccessMask    = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                .dstStageMask     = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                .dstAccessMask    = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_TRANSFER_READ_BIT,
+                .oldLayout        = VK_IMAGE_LAYOUT_GENERAL,
+                .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                .image            = output->image,
+                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+            };
+            toRead.push_back(barrier);
+        }
+        VkDependencyInfo depToRead{
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = static_cast<uint32_t>(toRead.size()),
+            .pImageMemoryBarriers    = toRead.data(),
+        };
+        vkCmdPipelineBarrier2(cmd, &depToRead);
+    });
 }
 
 void VulkanState::DrawImGuiContent() {

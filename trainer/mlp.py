@@ -39,7 +39,7 @@ class MlpDecoder(nn.Module):
 
         self.net = nn.Sequential(*layers)
 
-    def forward(self, latent_features: torch.Tensor, pe_features: torch.Tensor, mip_level):
+    def forward(self, latent_features: torch.Tensor, pe_features: torch.Tensor, mip_level) -> torch.Tensor:
         """
         latent_features: [B, latent_dim]
         pe_features: [B, pe_dim]

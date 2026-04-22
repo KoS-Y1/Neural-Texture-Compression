@@ -7,13 +7,15 @@ ConstantBuffer<shader_io::GlobalUniforms> pushConstants;
 [[vk::binding(0, 0)]]
 Sampler2D<float4> albedoTexture;
 [[vk::binding(1, 0)]]
-Sampler2D<float4> aoTexture;
+Sampler2D<float4> normalTexture;
 [[vk::binding(2, 0)]]
-Sampler2D<float4> emissiveTexture;
+Sampler2D<float4> aoTexture;
 [[vk::binding(3, 0)]]
 Sampler2D<float4> metallicRoughnessTexture;
 [[vk::binding(4, 0)]]
-Sampler2D<float4> normalTexture;
+Sampler2D<float4> emissiveTexture;
+
+// IBL
 [[vk::binding(5, 0)]]
 Sampler2D<float4> irradianceTexture;
 [[vk::binding(6, 0)]]

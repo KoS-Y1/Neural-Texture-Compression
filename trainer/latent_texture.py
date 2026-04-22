@@ -60,30 +60,43 @@ def gen_mipmaps(texture: torch.Tensor, num_levels=None) -> list[torch.Tensor]:
 
     return mipmaps
 
+def quantize_ste(x, num_bits=8):
+    """Quantization with straight-through estimator (used during training)."""
+    qmax = (2 ** num_bits) - 1
+
+    x_clamped = torch.clamp(x, 0, 1)
+    x_quant = torch.round(x_clamped * qmax) / qmax
+
+    return x_clamped + (x_quant - x_clamped).detach()
+
 
 class LatentTexture(nn.Module):
     def __init__(self, hi_res: int, hi_channels: int, low_res: int, lo_channels: int):
         super().__init__()
-        self.latent_hi = nn.Parameter(torch.randn(1, hi_channels, hi_res, hi_res) * 0.01)
-        self.latent_lo = nn.Parameter(torch.randn(1, lo_channels, low_res, low_res) * 0.01)
+        # Initialize in [0, 1] so quantize_ste's clamp is a no-op at step 0 and the full
+        # latent grid contributes from the start rather than half the cells starting at 0.
+        self.latent_hi = nn.Parameter(torch.rand(1, hi_channels, hi_res, hi_res))
+        self.latent_lo = nn.Parameter(torch.rand(1, lo_channels, low_res, low_res))
 
-    def sample(self, uv: torch.Tensor) -> torch.Tensor:
+    def sample(self, uv: torch.Tensor, hi_bits=8, lo_bits=4) -> torch.Tensor:
         """
          uv: [B, 2] in range [0, 1]
          return: [B, hi_channels + lo_channels]
         """
         # Remap to [-1, 1]; pack B points into the output-H dim of a single-batch grid
         grid = (uv * 2 - 1).view(1, -1, 1, 2)  # [1, B, 1, 2]
+        hi_q = quantize_ste(self.latent_hi, hi_bits)
+        lo_q = quantize_ste(self.latent_lo, lo_bits)
 
         hi = F.grid_sample(
-            self.latent_hi,
+            hi_q,
             grid,
             mode='bilinear',
             align_corners=True,
         ).squeeze(0).squeeze(-1).transpose(0, 1)  # [B, hi_channels]
 
         lo = F.grid_sample(
-            self.latent_lo,
+            lo_q,
             grid,
             mode='bilinear',
             align_corners=True,
