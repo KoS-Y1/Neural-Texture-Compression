@@ -1,62 +1,158 @@
 {
-  "version": 1,
+  "version": 2,
+  "base_resolution": 2048,
+  "num_bits": 4,
+  "quant_range": [
+    -0.46875,
+    0.5
+  ],
   "latent_hi": {
     "file": "latent_hi.bin",
     "width": 512,
     "height": 512,
-    "channels": 4,
+    "channels": 12,
     "dtype": "uint8",
-    "layout": "hwc_interleaved",
+    "layout": "array_layers_hwc4",
     "sample_format": "unorm",
-    "source_bits": 8
+    "source_bits": 4
   },
   "latent_lo": {
     "file": "latent_lo.bin",
     "width": 256,
     "height": 256,
-    "channels": 4,
+    "channels": 20,
     "dtype": "uint8",
-    "layout": "hwc_interleaved",
+    "layout": "array_layers_hwc4",
     "sample_format": "unorm",
     "source_bits": 4
   },
+  "levels": [
+    {
+      "index": 0,
+      "top_mip": 0,
+      "bottom_mip": 3,
+      "g0": {
+        "file": "latent_hi.bin",
+        "width": 512,
+        "height": 512,
+        "channels": 12
+      },
+      "g1": {
+        "file": "latent_lo.bin",
+        "width": 256,
+        "height": 256,
+        "channels": 20
+      }
+    },
+    {
+      "index": 1,
+      "top_mip": 4,
+      "bottom_mip": 5,
+      "g0": {
+        "file": "latent_hi_lvl1.bin",
+        "width": 32,
+        "height": 32,
+        "channels": 12
+      },
+      "g1": {
+        "file": "latent_lo_lvl1.bin",
+        "width": 16,
+        "height": 16,
+        "channels": 20
+      }
+    },
+    {
+      "index": 2,
+      "top_mip": 6,
+      "bottom_mip": 7,
+      "g0": {
+        "file": "latent_hi_lvl2.bin",
+        "width": 8,
+        "height": 8,
+        "channels": 12
+      },
+      "g1": {
+        "file": "latent_lo_lvl2.bin",
+        "width": 4,
+        "height": 4,
+        "channels": 20
+      }
+    },
+    {
+      "index": 3,
+      "top_mip": 8,
+      "bottom_mip": 9,
+      "g0": {
+        "file": "latent_hi_lvl3.bin",
+        "width": 2,
+        "height": 2,
+        "channels": 12
+      },
+      "g1": {
+        "file": "latent_lo_lvl3.bin",
+        "width": 2,
+        "height": 2,
+        "channels": 20
+      }
+    },
+    {
+      "index": 4,
+      "top_mip": 10,
+      "bottom_mip": 11,
+      "g0": {
+        "file": "latent_hi_lvl4.bin",
+        "width": 2,
+        "height": 2,
+        "channels": 12
+      },
+      "g1": {
+        "file": "latent_lo_lvl4.bin",
+        "width": 2,
+        "height": 2,
+        "channels": 20
+      }
+    }
+  ],
   "positional_encoder": {
-    "num_freq": 8,
-    "out_dim": 32
+    "kind": "tiled_triangular",
+    "tile": 8,
+    "octaves": 3,
+    "num_freq": 3,
+    "out_dim": 12
   },
   "mlp": {
     "file": "mlp.bin",
     "dtype": "float16",
     "weight_layout": "row_major_out_in",
-    "input_dim": 48,
+    "input_dim": 88,
     "output_dim": 15,
-    "total_bytes": 16542,
+    "total_bytes": 21662,
     "layers": [
       {
-        "in": 48,
+        "in": 88,
         "out": 64,
-        "activation": "relu",
+        "activation": "none",
         "weight_offset": 0,
-        "weight_size": 6144,
-        "bias_offset": 6144,
+        "weight_size": 11264,
+        "bias_offset": 11264,
         "bias_size": 128
       },
       {
         "in": 64,
         "out": 64,
-        "activation": "relu",
-        "weight_offset": 6272,
+        "activation": "none",
+        "weight_offset": 11392,
         "weight_size": 8192,
-        "bias_offset": 14464,
+        "bias_offset": 19584,
         "bias_size": 128
       },
       {
         "in": 64,
         "out": 15,
-        "activation": "sigmoid",
-        "weight_offset": 14592,
+        "activation": "none",
+        "weight_offset": 19712,
         "weight_size": 1920,
-        "bias_offset": 16512,
+        "bias_offset": 21632,
         "bias_size": 30
       }
     ]

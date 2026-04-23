@@ -29,12 +29,21 @@ SLANG_PUBLIC struct GlobalUniforms
     SLANG_PUBLIC float4x4 viewInverse;
 };
 
-// Hard coded layer info
-SLANG_PUBLIC static const uint32_t kInDim = 41;
-// CoopVec row-major matrices need 16-byte row alignment; pad the input vector to 48 FP16s.
-SLANG_PUBLIC static const uint32_t kInDimPadded = 48;
-SLANG_PUBLIC static const uint32_t kHiddenDim = 64;
-SLANG_PUBLIC static const uint32_t kOutDim = 15;
+// Hard-coded NTC layer info matching the trainer (paper-aligned: 4 G0 neighbors, tiled triangular PE).
+//   kLatentDimHi    = G0 channels (must be multiple of 4 for RGBA layered storage)
+//   kLatentDimLo    = G1 channels (must be multiple of 4)
+//   4*kLatentDimHi  = G0 contribution after 4-neighbor concat
+//   kPeDim          = 2 axes * (sin, cos) * 3 octaves = 12
+//   +1              = normalized LOD
+//   kInDimPadded    = next multiple of 8 (CoopVec row-alignment requirement)
+SLANG_PUBLIC static const uint32_t kLatentDimHi  = 12;
+SLANG_PUBLIC static const uint32_t kLatentDimLo  = 20;
+SLANG_PUBLIC static const uint32_t kPeOctaves   = 3;
+SLANG_PUBLIC static const uint32_t kPeDim       = 2 * 2 * kPeOctaves;
+SLANG_PUBLIC static const uint32_t kInDim       = 4 * kLatentDimHi + kLatentDimLo + kPeDim + 1;
+SLANG_PUBLIC static const uint32_t kInDimPadded = ((kInDim + 7) / 8) * 8;
+SLANG_PUBLIC static const uint32_t kHiddenDim   = 64;
+SLANG_PUBLIC static const uint32_t kOutDim      = 15;
 
 SLANG_PUBLIC struct MlpParams
 {

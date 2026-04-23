@@ -70,14 +70,19 @@ public:
 
     void Load(VulkanState &state);
 
-    [[nodiscard]] const NtcHeader            &GetHeader() const { return m_header; }
-    [[nodiscard]] VkSampler                   GetSampler() const { return m_defaultSampler; }
-    [[nodiscard]] const VulkanTexture        &GetLatentHi() const { return m_latentHi; }
-    [[nodiscard]] const VulkanTexture        &GetLatentLo() const { return m_latentLo; }
-    [[nodiscard]] VkBuffer                    GetMlpBuffer() const { return m_mlpBuffer; }
+    [[nodiscard]] const NtcHeader &GetHeader() const { return m_header; }
+
+    [[nodiscard]] VkSampler GetSampler() const { return m_defaultSampler; }
+
+    [[nodiscard]] const VulkanTexture &GetLatentHi() const { return m_latentHi; }
+
+    [[nodiscard]] const VulkanTexture &GetLatentLo() const { return m_latentLo; }
+
+    [[nodiscard]] VkBuffer GetMlpBuffer() const { return m_mlpBuffer; }
+
     [[nodiscard]] const shader_io::MlpParams &GetMlpParams() const { return m_mlpParams; }
 
-    [[nodiscard]] uint32_t             GetOutputResolution() const { return m_outputResolution; }
+    [[nodiscard]] uint32_t GetOutputResolution() const { return m_outputResolution; }
 
 
 private:
@@ -101,5 +106,5 @@ private:
     shader_io::MlpParams m_mlpParams{};
 
 private:
-    int32_t      m_outputResolution{0};
+    int32_t m_outputResolution{0};
 };

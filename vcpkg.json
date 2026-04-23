@@ -26,10 +26,10 @@
     "version>=" : "3.4.0",
     "features" : [ "vulkan" ]
   }, {
-    "name" : "glm",
-    "version>=" : "1.0.3"
-  }, {
     "name" : "tinyobjloader",
     "version>=" : "2.0.0rc13"
+  }, {
+    "name" : "glm",
+    "version>=" : "1.0.3"
   } ]
 }

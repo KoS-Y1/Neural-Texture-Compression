@@ -46,6 +46,8 @@ VSOut vertexMain(const VSIn input)
 
     static const float4x4 identity = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
+    
+
     const float3x3 normalMatrix = float3x3(identity);
 
     float3 T, B;
@@ -74,14 +76,17 @@ VSOut vertexMain(const VSIn input)
 [shader("pixel")]
 float4 fragmentMain(VSOut vsStage)
 {
-    const float3 albedo = albedoTexture.Sample(vsStage.uv).rgb;
-    const float3 mr = metallicRoughnessTexture.Sample(vsStage.uv).rgb;
-    const float3 emissive = emissiveTexture.Sample(vsStage.uv).rgb;
+    float2 uv = vsStage.uv;
+    // Flip uv
+    uv.y = -uv.y;
+    const float3 albedo = albedoTexture.Sample(uv).rgb;
+    const float3 mr = metallicRoughnessTexture.Sample(uv).rgb;
+    const float3 emissive = emissiveTexture.Sample(uv).rgb;
     const float roughness = mr.g;
     const float metallic = mr.b;
-    const float ao = aoTexture.Sample(vsStage.uv).r;
+    const float ao = aoTexture.Sample(uv).r;
 
-    const float3 normalTS = normalTexture.Sample(vsStage.uv).xyz * 2.0f - 1.0f;
+    const float3 normalTS = normalTexture.Sample(uv).xyz * 2.0f - 1.0f;
 
     // Fixed light because I'm lazy
     const float3 lightDir = normalize(float3(0.5f, 1.0f, 0.5f));
@@ -100,5 +105,6 @@ float4 fragmentMain(VSOut vsStage)
     const float3 ibl = CalculateIBL(N, NdotV, R, F0, albedo, roughness, metallic, ao, irradianceTexture,
                                     specularTexture, brdfLutTexture);
 
-    return float4(pbr + ibl + emissive, 1.0f);
+    return float4(pbr + ibl * 0.5 + emissive, 1.0f);
+    // return RGBMToLinear(float4(pbr + ibl + emissive, 1.0f));
 }

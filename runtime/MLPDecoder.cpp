@@ -133,12 +133,22 @@ void MLPDecoder::Load(VulkanState &state) {
             VulkanTexture *texture;
             uint32_t       width{0};
             uint32_t       height{0};
+            uint32_t       channels{0};
         };
 
         const std::vector<TextureUpload> uploads{
-            {kMLPDir + m_header.latentLo.file, VK_FORMAT_R8G8B8A8_UNORM, &m_latentLo, m_header.latentLo.width, m_header.latentLo.height},
-            {kMLPDir + m_header.latentHi.file, VK_FORMAT_R8G8B8A8_UNORM, &m_latentHi, m_header.latentHi.width, m_header.latentHi.height},
+            {kMLPDir + m_header.latentLo.file,
+             VK_FORMAT_R8G8B8A8_UNORM, &m_latentLo,
+             m_header.latentLo.width,
+             m_header.latentLo.height,
+             m_header.latentLo.channels},
+            {kMLPDir + m_header.latentHi.file,
+             VK_FORMAT_R8G8B8A8_UNORM, &m_latentHi,
+             m_header.latentHi.width,
+             m_header.latentHi.height,
+             m_header.latentHi.channels},
         };
+
 
         for (const TextureUpload &upload: uploads) {
             DebugInfo("Loading latent from file {}", upload.path);
@@ -147,7 +157,7 @@ void MLPDecoder::Load(VulkanState &state) {
             const uint32_t     width      = upload.width;
             const uint32_t     height     = upload.height;
             VulkanTexture     *texture    = upload.texture;
-            const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4;
+            const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * upload.channels;
             DebugCheckCritical(source.size() == bufferSize, "{} size {} does not match expected {}", upload.path, source.size(), bufferSize);
 
             VkBufferCreateInfo infoStagingBuffer{
@@ -180,7 +190,7 @@ void MLPDecoder::Load(VulkanState &state) {
                 .format        = upload.format,
                 .extent        = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1},
                 .mipLevels     = 1,
-                .arrayLayers   = 1,
+                .arrayLayers   = upload.channels / 4,
                 .samples       = VK_SAMPLE_COUNT_1_BIT,
                 .tiling        = VK_IMAGE_TILING_OPTIMAL,
                 .usage         = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
@@ -204,7 +214,7 @@ void MLPDecoder::Load(VulkanState &state) {
                     .oldLayout        = VK_IMAGE_LAYOUT_UNDEFINED,
                     .newLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     .image            = texture->image,
-                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, upload.channels / 4},
                 };
                 VkDependencyInfo depToTransfer{
                     .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
@@ -214,7 +224,7 @@ void MLPDecoder::Load(VulkanState &state) {
                 vkCmdPipelineBarrier2(commandBuffer, &depToTransfer);
 
                 VkBufferImageCopy region{
-                    .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
+                    .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, upload.channels / 4},
                     .imageExtent      = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1},
                 };
                 vkCmdCopyBufferToImage(commandBuffer, stagingBuffer, texture->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
@@ -228,7 +238,7 @@ void MLPDecoder::Load(VulkanState &state) {
                     .oldLayout        = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                     .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
                     .image            = texture->image,
-                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                    .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, upload.channels / 4},
                 };
                 VkDependencyInfo infoDependency{
                     .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
@@ -243,11 +253,11 @@ void MLPDecoder::Load(VulkanState &state) {
             VkImageViewCreateInfo infoView{
                 .sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
                 .image    = texture->image,
-                .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY,
                 .format   = upload.format,
                 .components =
                     {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY},
-                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, upload.channels / 4},
             };
             result = vkCreateImageView(state.GetDevice(), &infoView, nullptr, &texture->view);
             DebugCheckCritical(result == VK_SUCCESS, "Failed to create image view for {}", upload.path);

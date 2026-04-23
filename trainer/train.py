@@ -1,4 +1,5 @@
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -12,7 +13,6 @@ _THIS_DIR = Path(__file__).resolve().parent
 if str(_THIS_DIR) not in sys.path:
     sys.path.insert(0, str(_THIS_DIR))
 
-import latent_texture
 import mlp
 
 PROJECT_ROOT = _THIS_DIR.parent
@@ -20,68 +20,129 @@ ASSETS_LOAD_DIR = PROJECT_ROOT / "assets/source"
 ASSETS_EXPORT_DIR = PROJECT_ROOT / "assets/export"
 
 
-def train_ntc(texture_bundle: torch.Tensor, num_iter=240000, batch_size=65536, lr_latent=0.01, lr_mlp=0.005):
+# Load PBR texture bundle
+def load_pbr_texture(paths: dict, resolution: int | None = None) -> torch.Tensor:
+    """
+      paths: {
+          'albedo': 'albedo.png',      # 3 channels
+          'normal': 'normal.png',      # 3 channels
+          'roughness': 'roughness.png', # 1 channel
+          'metalness': 'metalness.png', # 1 channel
+          'ao': 'ao.png',              # 1 channel
+      }
+
+      resolution: if None, use the native size of the first image; all others are
+      resized to match so channels stack cleanly.
+
+      returns: tensor [C, H, W] with all channels stacked, values in [0, 1]
+      """
+    channels = []
+    target_size = None
+    for name, path in paths.items():
+        img = Image.open(path)
+
+        if target_size is None:
+            target_size = (resolution, resolution) if resolution is not None else img.size
+
+        if img.size != target_size:
+            img = img.resize(target_size)
+
+        # Load image and convert it to float value [H, W, C]
+        t = torch.from_numpy(np.array(img)).float() / 255.0
+
+        # If single channel (roughness, metallic, etc.)
+        # [H, W] to [H, W, C]
+        if t.ndim == 2:
+            t = t.unsqueeze(-1)
+
+        channels.append(t)
+    bundle = torch.cat(channels, dim=-1)
+    return bundle.permute(2, 0, 1)  # [C_total, H, W]
+
+
+# Generate mipmaps from input texture
+def gen_mipmaps(texture: torch.Tensor, num_levels=None) -> list[torch.Tensor]:
+    if num_levels is None:
+        num_levels = int(np.log2(min(texture.shape[1], texture.shape[2])))
+
+    mipmaps = [texture]
+
+    for _ in range(num_levels - 1):
+        prev = mipmaps[-1]
+        downsampled = F.avg_pool2d(prev.unsqueeze(0), kernel_size=2, stride=2).squeeze(0)
+        mipmaps.append(downsampled)
+
+    return mipmaps
+
+
+def _sample_lod(num_mip_levels: int, device: torch.device) -> int:
+    """Paper Sec 5.1: LOD = floor(-log_4 X), X~U(0,1); 5% uniform fallback."""
+    if torch.rand((), device=device).item() < 0.05:
+        return int(torch.randint(0, num_mip_levels, (1,), device=device).item())
+    x = torch.rand((), device=device).clamp_min(1e-8).item()
+    lod = int(math.floor(-math.log(x) / math.log(4)))
+    return min(lod, num_mip_levels - 1)
+
+
+def train_ntc(texture_bundle: torch.Tensor, num_iter, batch_size=65536, lr_latent=0.01, lr_mlp=0.005,
+              c0=12, c1=20, num_bits=4, qat_freeze_frac=0.05):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    num_channels = texture_bundle.shape[0]  # Channels of the texture bundle
+    num_channels = texture_bundle.shape[0]
+    base_resolution = texture_bundle.shape[-1]
 
-    def get_latent_res(texture_res: int, compression_ratio=4, lo_scale=8):
-        hi_res = texture_res // compression_ratio
-        lo_res = texture_res // lo_scale
-
-        return hi_res, lo_res
-
-    hi_res, lo_res = get_latent_res(texture_bundle.shape[1])
-    hi_channels, lo_channels = 4, 4  # Latent grid channels (compression hyperparam)
-    num_freq = 8
-
-    # Build mip map chain
-    mips = latent_texture.gen_mipmaps(texture_bundle)
+    mips = gen_mipmaps(texture_bundle)
     num_mip_levels = len(mips)
     mips = [m.to(device) for m in mips]
 
-    # Initialize modules
-    latent_tex = latent_texture.LatentTexture(hi_res, hi_channels, lo_res, lo_channels).to(device)
-    pe: mlp.PositionalEncoder = mlp.PositionalEncoder(num_freq).to(device)
+    pyramid = mlp.LatentPyramid(base_resolution, c0=c0, c1=c1, num_bits=num_bits).to(device)
+    pe = mlp.TiledPositionalEncoder().to(device)
     mlp_decoder = mlp.MlpDecoder(
-        latent_dim=hi_channels + lo_channels,
+        latent_dim=c0 * 4 + c1,
         pe_dim=pe.out_dim,
         output_channels=num_channels,
         hidden_dim=64,
-        num_hidden=2
     ).to(device)
 
+    print(f"Pyramid: {pyramid.num_levels} levels, c0={c0}, c1={c1}, {num_bits}-bit grids")
+    for i in range(pyramid.num_levels):
+        m = pyramid.level_meta(i)
+        print(f"  L{i}: G0={m['res0']}^2 G1={m['res1']}^2  mips {m['top_mip']}..{m['bottom_mip']}")
+    print(f"MLP input dim: {mlp_decoder.input_dim} (latent {c0 * 4 + c1} + pe {pe.out_dim} + lod 1)")
+
     optimizer = torch.optim.Adam([
-        {'params': latent_tex.parameters(), 'lr': lr_latent},
+        {'params': pyramid.parameters(), 'lr': lr_latent},
         {'params': mlp_decoder.parameters(), 'lr': lr_mlp},
     ])
-
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=num_iter, eta_min=0)
 
+    freeze_step = int(num_iter * (1.0 - qat_freeze_frac))
+    grids_frozen = False
+
     for step in range(num_iter):
-        mip_idx = torch.randint(0, num_mip_levels, (1,)).item()
-        mip_texture = mips[mip_idx]  # [C, H_m, W_m]
+        mip_idx = _sample_lod(num_mip_levels, device)
+        mip_texture = mips[mip_idx]
         H_m, W_m = mip_texture.shape[1], mip_texture.shape[2]
+        n = min(batch_size, H_m * W_m)
 
-        # Radom pixel positon
-        px = torch.randint(0, W_m, (batch_size,), device=device)
-        py = torch.randint(0, H_m, (batch_size,), device=device)
-
-        # Remape to [0, 1] uv space
+        px = torch.randint(0, W_m, (n,), device=device)
+        py = torch.randint(0, H_m, (n,), device=device)
         u = (px.float() + 0.5) / W_m
         v = (py.float() + 0.5) / H_m
-        uv = torch.stack([u, v], dim=-1)  # [B, 2]
+        uv = torch.stack([u, v], dim=-1)
+        ground_truth = mip_texture[:, py, px].T
 
-        ground_truth = mip_texture[:, py, px].T  # [B, C]
+        # QAT freeze phase: hard-quantize grids and stop updating them; only fine-tune the MLP.
+        if step == freeze_step and not grids_frozen:
+            pyramid.clamp_to_quant_range()
+            for p in pyramid.parameters():
+                p.requires_grad_(False)
+            grids_frozen = True
+            print(f"Step {step}: freezing latent grids, fine-tuning MLP only for last {num_iter - step} steps")
 
-        # Forward pass
-        latent_feature = latent_tex.sample(uv)
-        pe_feature = pe(uv)
-        mip_norm = torch.full(
-            (batch_size, 1),
-            mip_idx / max(num_mip_levels - 1, 1),
-            device=device,
-        )
+        latent_feature = pyramid.sample(uv, mip_idx, qat_noise=not grids_frozen, hard_quant=grids_frozen)
+        pe_feature = pe(uv, base_resolution)
+        mip_norm = torch.full((n, 1), mip_idx / max(num_mip_levels - 1, 1), device=device)
         pred = mlp_decoder(latent_feature, pe_feature, mip_norm)
 
         loss = F.mse_loss(pred, ground_truth)
@@ -91,83 +152,89 @@ def train_ntc(texture_bundle: torch.Tensor, num_iter=240000, batch_size=65536, l
         optimizer.step()
         scheduler.step()
 
+        if not grids_frozen:
+            pyramid.clamp_to_quant_range()
+
         if step % 500 == 0 or step == num_iter - 1:
             psnr = -10 * torch.log10(loss).item()
-            print(f"Step {step} / {num_iter} | Loss: {loss.item():.6f} | PSNR: {psnr:.2f} dB")
+            print(f"Step {step} / {num_iter} | mip {mip_idx} | Loss: {loss.item():.6f} | PSNR: {psnr:.2f} dB")
 
-    return latent_tex, mlp_decoder, pe
-
-
-def quantize_export(x, num_bits):
-    """Hard quantization to integer codes for on-disk storage."""
-    qmax = (2 ** num_bits) - 1
-    x_clamped = torch.clamp(x, 0, 1)
-    codes = (x_clamped * qmax).round()
-    dtype = torch.uint8 if num_bits <= 8 else torch.int16
-    return codes.to(dtype)
+    return pyramid, mlp_decoder, pe
 
 
-def export_ntc(latent_tex: latent_texture.LatentTexture, mlp_decoder: mlp.MlpDecoder, pe: mlp.PositionalEncoder, path):
+def export_ntc(pyramid: mlp.LatentPyramid, mlp_decoder: mlp.MlpDecoder, pe: mlp.TiledPositionalEncoder, path):
     torch.save({
-        'latent_hi': quantize_export(latent_tex.latent_hi.data, num_bits=8),
-        'latent_hi_bits': 8,
-        'latent_lo': quantize_export(latent_tex.latent_lo.data, num_bits=4),
-        'latent_lo_bits': 4,
+        'pyramid_state': pyramid.state_dict(),
+        'pyramid_meta': [pyramid.level_meta(i) for i in range(pyramid.num_levels)],
+        'num_bits': pyramid.num_bits,
         'mlp_weights': mlp_decoder.state_dict(),
-        'pe_num_freq': pe.num_freq,
+        'pe_tile': pe.tile,
+        'pe_octaves': pe.num_freq,
         'config': {
-            'hi_res': latent_tex.latent_hi.shape[-1],
-            'lo_res': latent_tex.latent_lo.shape[-1],
-            'hi_channels': latent_tex.latent_hi.shape[1],
-            'lo_channels': latent_tex.latent_lo.shape[1],
+            'base_resolution': pyramid.base_resolution,
+            'c0': pyramid.c0,
+            'c1': pyramid.c1,
         }
     }, path)
 
 
-def _quantize_to_unorm8(x: torch.Tensor, num_bits: int) -> np.ndarray:
-    """Quantize to num_bits levels, then remap to full [0, 255] uint8 range.
+def _grid_to_array_layers(grid: torch.Tensor, num_bits: int) -> np.ndarray:
+    """[1, C, H, W] grid (in asymmetric quant range) -> [L, H, W, 4] UNORM8 layout.
 
-    This preserves the training-time quantization error while letting Vulkan
-    sample the texture as R8_UNORM and receive values in [0, 1] directly.
+    Hard-quantizes via mlp.quantize_to_codes and rescales codes to [0, 255] so
+    the runtime can sample the texture as VK_FORMAT_R8G8B8A8_UNORM (and undo
+    the rescale by multiplying with the quant range when reconstructing).
     """
-    qmax = (2 ** num_bits) - 1
-    x_clamped = torch.clamp(x, 0, 1)
-    codes = torch.round(x_clamped * qmax) / qmax
-    return (codes * 255.0).round().to(torch.uint8).cpu().numpy()
-
-
-def _latent_to_interleaved_hwc(latent: torch.Tensor, num_bits: int) -> np.ndarray:
-    """[1, C, H, W] latent parameter -> [H, W, C] uint8 buffer, UNORM-ready."""
-    tensor = latent.detach()[0]  # [C, H, W]
-    quantized = _quantize_to_unorm8(tensor, num_bits)  # [C, H, W]
-    return np.ascontiguousarray(np.transpose(quantized, (1, 2, 0)))  # [H, W, C]
+    tensor = grid.detach()[0]
+    c, h, w = tensor.shape
+    assert c % 4 == 0, f"grid channels must be divisible by 4, got {c}"
+    codes = mlp.quantize_to_codes(tensor, num_bits)  # [0, N-1]
+    n = (1 << num_bits) - 1
+    rescaled = (codes.float() / n * 255.0).round().to(torch.uint8).cpu().numpy()
+    layered = rescaled.reshape(c // 4, 4, h, w).transpose(0, 2, 3, 1)
+    return np.ascontiguousarray(layered)
 
 
 def export_runtime(
-        latent_tex: latent_texture.LatentTexture,
+        pyramid: mlp.LatentPyramid,
         mlp_decoder: mlp.MlpDecoder,
-        pe: mlp.PositionalEncoder,
+        pe: mlp.TiledPositionalEncoder,
         out_dir: Path,
-        hi_bits: int = 8,
-        lo_bits: int = 4,
 ):
     """Export latent grids, MLP weights, and a JSON header for the C++ runtime.
 
     Layout:
       out_dir/
-        ntc.json        -- config, layer shapes, byte offsets
-        latent_hi.bin   -- uint8, row-major [H, W, C], UNORM-ready
-        latent_lo.bin   -- uint8, row-major [H, W, C], UNORM-ready
-        mlp.bin         -- float16, concatenated Linear layers in forward order,
-                           each layer stored as weight [out, in] row-major then
-                           bias [out].
+        ntc.json                   -- config, layer shapes, byte offsets, level table
+        latent_hi.bin              -- level 0 G0, uint8 layer-major [L, H, W, 4] (back-compat)
+        latent_lo.bin              -- level 0 G1, uint8 layer-major [L, H, W, 4] (back-compat)
+        latent_hi_lvlN.bin (N>=1)  -- level N G0
+        latent_lo_lvlN.bin (N>=1)  -- level N G1
+        mlp.bin                    -- float16, weight [out, in] row-major then bias [out].
     """
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    hi_hwc = _latent_to_interleaved_hwc(latent_tex.latent_hi, hi_bits)
-    lo_hwc = _latent_to_interleaved_hwc(latent_tex.latent_lo, lo_bits)
-    (out_dir / "latent_hi.bin").write_bytes(hi_hwc.tobytes())
-    (out_dir / "latent_lo.bin").write_bytes(lo_hwc.tobytes())
+    levels_meta = []
+    for i in range(pyramid.num_levels):
+        level = pyramid.levels[i]
+        meta = pyramid.level_meta(i)
+        hi_buf = _grid_to_array_layers(level.g0, pyramid.num_bits)
+        lo_buf = _grid_to_array_layers(level.g1, pyramid.num_bits)
+        hi_name = "latent_hi.bin" if i == 0 else f"latent_hi_lvl{i}.bin"
+        lo_name = "latent_lo.bin" if i == 0 else f"latent_lo_lvl{i}.bin"
+        (out_dir / hi_name).write_bytes(hi_buf.tobytes())
+        (out_dir / lo_name).write_bytes(lo_buf.tobytes())
+        levels_meta.append({
+            "index": i,
+            "top_mip": meta["top_mip"],
+            "bottom_mip": meta["bottom_mip"],
+            "g0": {"file": hi_name, "width": meta["res0"], "height": meta["res0"], "channels": meta["c0"]},
+            "g1": {"file": lo_name, "width": meta["res1"], "height": meta["res1"], "channels": meta["c1"]},
+        })
+
+    # Level 0 grids are also surfaced under the legacy keys for the existing single-level runtime.
+    hi_meta = levels_meta[0]["g0"]
+    lo_meta = levels_meta[0]["g1"]
 
     def _activation_name(m: nn.Module) -> str:
         if isinstance(m, nn.ReLU):
@@ -178,9 +245,9 @@ def export_runtime(
 
     linear_layers: list[tuple[nn.Linear, str]] = []
     modules = list(mlp_decoder.net)
-    for i, m in enumerate(modules):
+    for mi, m in enumerate(modules):
         if isinstance(m, nn.Linear):
-            activation = _activation_name(modules[i + 1]) if i + 1 < len(modules) else "none"
+            activation = _activation_name(modules[mi + 1]) if mi + 1 < len(modules) else "none"
             linear_layers.append((m, activation))
 
     # Cooperative vector row-major matrices require each row to be a multiple of 16 bytes;
@@ -219,34 +286,34 @@ def export_runtime(
 
     (out_dir / "mlp.bin").write_bytes(b"".join(mlp_buffers))
 
-    hi_h, hi_w, hi_c = hi_hwc.shape
-    lo_h, lo_w, lo_c = lo_hwc.shape
     input_dim = mlp_layers_meta[0]["in"] if mlp_layers_meta else 0
     output_dim = mlp_layers_meta[-1]["out"] if mlp_layers_meta else 0
+    quant_lo, quant_hi = mlp.quant_range(pyramid.num_bits)
+
+    def _level0_compat(meta_g: dict) -> dict:
+        return {
+            "file": meta_g["file"],
+            "width": meta_g["width"],
+            "height": meta_g["height"],
+            "channels": meta_g["channels"],
+            "dtype": "uint8",
+            "layout": "array_layers_hwc4",
+            "sample_format": "unorm",
+            "source_bits": pyramid.num_bits,
+        }
 
     header = {
-        "version": 1,
-        "latent_hi": {
-            "file": "latent_hi.bin",
-            "width": hi_w,
-            "height": hi_h,
-            "channels": hi_c,
-            "dtype": "uint8",
-            "layout": "hwc_interleaved",
-            "sample_format": "unorm",
-            "source_bits": hi_bits,
-        },
-        "latent_lo": {
-            "file": "latent_lo.bin",
-            "width": lo_w,
-            "height": lo_h,
-            "channels": lo_c,
-            "dtype": "uint8",
-            "layout": "hwc_interleaved",
-            "sample_format": "unorm",
-            "source_bits": lo_bits,
-        },
+        "version": 2,
+        "base_resolution": pyramid.base_resolution,
+        "num_bits": pyramid.num_bits,
+        "quant_range": [quant_lo, quant_hi],
+        "latent_hi": _level0_compat(hi_meta),
+        "latent_lo": _level0_compat(lo_meta),
+        "levels": levels_meta,
         "positional_encoder": {
+            "kind": "tiled_triangular",
+            "tile": int(pe.tile),
+            "octaves": int(pe.num_freq),
             "num_freq": int(pe.num_freq),
             "out_dim": int(pe.out_dim),
         },
@@ -265,27 +332,31 @@ def export_runtime(
         json.dump(header, f, indent=2)
 
 
-def reconstruct_texture(resolution, latent_tex, mlp_decoder, pe, device, mip_level=0.0, batch_size=65536):
-    """Decompress the full texture by sampling all pixel UVs."""
+def reconstruct_texture(resolution, pyramid: mlp.LatentPyramid, mlp_decoder, pe: mlp.TiledPositionalEncoder,
+                        device, mip=0, batch_size=65536):
+    """Decompress one mip level by sampling all pixel UVs through the pyramid."""
     h = w = resolution
     vs = (torch.arange(h, device=device).float() + 0.5) / h
     us = (torch.arange(w, device=device).float() + 0.5) / w
     grid_v, grid_u = torch.meshgrid(vs, us, indexing='ij')
-    uv = torch.stack([grid_u.flatten(), grid_v.flatten()], dim=-1)  # [H*W, 2]
+    uv = torch.stack([grid_u.flatten(), grid_v.flatten()], dim=-1)
+
+    max_mip = int(math.log2(pyramid.base_resolution))
+    mip_norm_value = mip / max(max_mip, 1)
 
     pieces = []
-    latent_tex.eval()
+    pyramid.eval()
     mlp_decoder.eval()
     with torch.no_grad():
         for i in range(0, uv.shape[0], batch_size):
             batch_uv = uv[i:i + batch_size]
-            feat = latent_tex.sample(batch_uv)
-            pe_feat = pe(batch_uv)
-            mip_norm = torch.full((batch_uv.shape[0], 1), mip_level, device=device)
+            feat = pyramid.sample(batch_uv, mip, qat_noise=False, hard_quant=True)
+            pe_feat = pe(batch_uv, pyramid.base_resolution)
+            mip_norm = torch.full((batch_uv.shape[0], 1), mip_norm_value, device=device)
             pieces.append(mlp_decoder(feat, pe_feat, mip_norm))
 
-    pixels = torch.cat(pieces, dim=0)  # [H*W, C]
-    return pixels.T.reshape(-1, h, w)  # [C, H, W]
+    pixels = torch.cat(pieces, dim=0)
+    return pixels.T.reshape(-1, h, w)
 
 
 def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
@@ -297,9 +368,12 @@ def tensor_to_pil(tensor: torch.Tensor) -> Image.Image:
     return Image.fromarray(arr)
 
 
-def visualize_latent(latent_param: torch.nn.Parameter) -> torch.Tensor:
-    """Take the first 3 channels of a latent grid and normalize for display as RGB."""
-    tensor = latent_param.data[0]  # [C, H, W]
+def visualize_latent(latent_param: torch.Tensor) -> torch.Tensor:
+    """First 3 channels of a latent grid normalized to [0,1] for display."""
+    if latent_param.dim() == 4:
+        tensor = latent_param.data[0]
+    else:
+        tensor = latent_param.data
     viz = tensor[:3]
     viz = (viz - viz.min()) / (viz.max() - viz.min() + 1e-8)
     return viz
@@ -339,7 +413,7 @@ def diff_image(orig: torch.Tensor, rec: torch.Tensor, amplify: float = 5.0) -> I
     return tensor_to_pil(diff.clamp(0, 1))
 
 
-def main(resolution=None, num_iter=240000):
+def main(resolution=None, num_iter=250000):
     ASSETS_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     paths = {
@@ -352,24 +426,23 @@ def main(resolution=None, num_iter=240000):
 
     print("Loading textures at native resolution..." if resolution is None
           else f"Loading textures at {resolution}x{resolution}...")
-    bundle = latent_texture.load_pbr_texture(paths, resolution=resolution)
+    bundle = load_pbr_texture(paths, resolution=resolution)
     print(f"Texture bundle shape: {tuple(bundle.shape)}")
 
-    # Derive output resolution from the loaded bundle (H == W is assumed throughout).
     resolution = bundle.shape[-1]
 
-    latent_tex, mlp_decoder, pe = train_ntc(bundle, num_iter=num_iter)
+    pyramid, mlp_decoder, pe = train_ntc(bundle, num_iter=num_iter)
 
     device = next(mlp_decoder.parameters()).device
 
     print("Saving compressed NTC model...")
-    export_ntc(latent_tex, mlp_decoder, pe, str(ASSETS_EXPORT_DIR / "ntc.pt"))
+    export_ntc(pyramid, mlp_decoder, pe, str(ASSETS_EXPORT_DIR / "ntc.pt"))
 
     print("Saving runtime layout for C++ ...")
-    export_runtime(latent_tex, mlp_decoder, pe, ASSETS_EXPORT_DIR / "runtime")
+    export_runtime(pyramid, mlp_decoder, pe, ASSETS_EXPORT_DIR / "runtime")
 
     print("Reconstructing full textures...")
-    reconstructed = reconstruct_texture(resolution, latent_tex, mlp_decoder, pe, device)
+    reconstructed = reconstruct_texture(resolution, pyramid, mlp_decoder, pe, device, mip=0)
 
     # Channel layout matches the order used in load_pbr_texture
     channel_splits = [
@@ -380,11 +453,10 @@ def main(resolution=None, num_iter=240000):
         ('emissive', 12, 15),
     ]
 
-    # Latent visualization (shared across rows)
-    hi_viz = visualize_latent(latent_tex.latent_hi)
-    lo_viz = visualize_latent(latent_tex.latent_lo)
-    hi_pil = tensor_to_pil(hi_viz)
-    lo_pil = tensor_to_pil(lo_viz)
+    # Latent visualization uses level 0 (the level that serves the highest mips).
+    level0 = pyramid.levels[0]
+    hi_pil = tensor_to_pil(visualize_latent(level0.g0))
+    lo_pil = tensor_to_pil(visualize_latent(level0.g1))
     hi_pil.save(ASSETS_EXPORT_DIR / "latent_hi.png")
     lo_pil.save(ASSETS_EXPORT_DIR / "latent_lo.png")
     latent_display = hi_pil.resize((resolution, resolution), Image.NEAREST)

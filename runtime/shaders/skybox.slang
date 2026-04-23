@@ -34,7 +34,8 @@ float4 fragmentMain(VSOut input)
 
     float3 worldPos = normalize(input.worldPos);
 
-    const float2 uv = SampleSphericalMap(worldPos);
+    float2 uv = SampleSphericalMap(worldPos);
+    uv.y = -uv.y;
 
     float4 skybox = skyboxTexture.SampleLevel(uv, 0);
 

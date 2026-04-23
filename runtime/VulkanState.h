@@ -158,6 +158,7 @@ private:
     };
 
     VkSampler m_defaultSampler{};
+    VkSampler m_defaultNearestSampler{};
 
     std::array<VulkanTexture, kMaxFramesInFlight> m_sceneColors{};
     std::array<VulkanTexture, kMaxFramesInFlight> m_sceneDepths{};
@@ -178,6 +179,10 @@ private:
     std::unique_ptr<MLPDecoder> m_mlp{};
 
     VulkanTexture m_computeOutAlbedo{};
+    // Aliased SRGB view of m_computeOutAlbedo's image. Compute writes raw bytes via the UNORM
+    // view; the forward shader samples through this SRGB view so the GPU does sRGB->linear
+    // automatically (matching the VK_FORMAT_R8G8B8A8_SRGB source albedo path).
+    VkImageView   m_computeOutAlbedoSrgbView{};
     VulkanTexture m_computeOutNormal{};
     VulkanTexture m_computeOutAO{};
     VulkanTexture m_computeOutMetallicRoughness{};

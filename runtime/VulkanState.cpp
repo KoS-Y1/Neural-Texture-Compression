@@ -830,6 +830,22 @@ void VulkanState::InitResources() {
         DebugCheckCritical(result == VK_SUCCESS, "Failed to create default sampler");
         m_deletionQueue.Push([&]() { vkDestroySampler(m_device, m_defaultSampler, nullptr); });
     }
+    // Default sampler
+    {
+        const VkSamplerCreateInfo infoSampler{
+            .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+            .magFilter    = VK_FILTER_NEAREST,
+            .minFilter    = VK_FILTER_NEAREST,
+            .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            .maxLod       = VK_LOD_CLAMP_NONE,
+        };
+        VkResult result = vkCreateSampler(m_device, &infoSampler, nullptr, &m_defaultNearestSampler);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create default nearest sampler");
+        m_deletionQueue.Push([&]() { vkDestroySampler(m_device, m_defaultNearestSampler, nullptr); });
+    }
 
     // Scene targets
     {
@@ -1023,7 +1039,7 @@ void VulkanState::InitResources() {
             {"../assets/source/Default_metalRoughness.jpg", VK_FORMAT_R8G8B8A8_UNORM, &m_helmetMetallicRoughness},
             {"../assets/source/Default_emissive.jpg",       VK_FORMAT_R8G8B8A8_UNORM, &m_helmetEmissive         },
             {"../assets/skybox/skybox.png",                 VK_FORMAT_R8G8B8A8_SRGB,  &m_skyboxTexture          },
-            {"../assets/skybox/skybox_irradiance.png",      VK_FORMAT_R8G8B8A8_UNORM, &m_skyboxIrradiance       },
+            {"../assets/skybox/skybox_irradiance.png",      VK_FORMAT_R8G8B8A8_UNORM,   &m_skyboxIrradiance       },
             {"../assets/skybox/skybox_specular.png",        VK_FORMAT_R8G8B8A8_UNORM, &m_skyboxSpecular         },
             {"../assets/skybox/brdf_lut.png",               VK_FORMAT_R8G8B8A8_UNORM, &m_brdfLut                },
         };
@@ -1031,7 +1047,7 @@ void VulkanState::InitResources() {
         for (const TextureUpload &upload: uploads) {
             int                width{0};
             int                height{0};
-            unsigned char     *pixels     = ntc::LoadImage(upload.path, width, height);
+            unsigned char     *pixels     = ntc::LoadImage(upload.path, width, height, false);
             VulkanTexture     *texture    = upload.texture;
             const VkDeviceSize bufferSize = static_cast<VkDeviceSize>(width) * static_cast<VkDeviceSize>(height) * 4;
 
@@ -1157,9 +1173,24 @@ void VulkanState::InitResources() {
         constexpr VkFormat kOutputFormat    = VK_FORMAT_R8G8B8A8_UNORM;
         const uint32_t     outputResolution = m_mlp->GetOutputResolution();
 
+        // Albedo image needs an SRGB-aliased sampled view (so the forward shader path matches
+        // the source albedo's VK_FORMAT_R8G8B8A8_SRGB load). UNORM and SRGB are format-compatible,
+        // but the image must be created with MUTABLE_FORMAT and a format list.
+        const std::vector<VkFormat> albedoViewFormats{VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8G8B8A8_SRGB};
+
         for (const OutputCreate &out: outputs) {
+            const bool isAlbedo = (out.texture == &m_computeOutAlbedo);
+
+            VkImageFormatListCreateInfo formatList{
+                .sType           = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO,
+                .viewFormatCount = static_cast<uint32_t>(albedoViewFormats.size()),
+                .pViewFormats    = albedoViewFormats.data(),
+            };
+
             VkImageCreateInfo infoImage{
                 .sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+                .pNext         = isAlbedo ? &formatList : nullptr,
+                .flags         = isAlbedo ? VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT : VkImageCreateFlags{0},
                 .imageType     = VK_IMAGE_TYPE_2D,
                 .format        = kOutputFormat,
                 .extent        = {outputResolution, outputResolution, 1},
@@ -1186,6 +1217,19 @@ void VulkanState::InitResources() {
             result = vkCreateImageView(m_device, &infoView, nullptr, &out.texture->view);
             DebugCheckCritical(result == VK_SUCCESS, "Failed to create reconstruct output view {}", out.name);
             m_deletionQueue.Push([&, tex = out.texture]() { vkDestroyImageView(m_device, tex->view, nullptr); });
+
+            if (isAlbedo) {
+                VkImageViewUsageCreateInfo infoSrgbUsage{
+                    .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO,
+                    .usage = VK_IMAGE_USAGE_SAMPLED_BIT,
+                };
+                VkImageViewCreateInfo infoSrgbView = infoView;
+                infoSrgbView.pNext                 = &infoSrgbUsage;
+                infoSrgbView.format                = VK_FORMAT_R8G8B8A8_SRGB;
+                result                             = vkCreateImageView(m_device, &infoSrgbView, nullptr, &m_computeOutAlbedoSrgbView);
+                DebugCheckCritical(result == VK_SUCCESS, "Failed to create SRGB sampled view for {}", out.name);
+                m_deletionQueue.Push([&]() { vkDestroyImageView(m_device, m_computeOutAlbedoSrgbView, nullptr); });
+            }
         }
     }
 }
@@ -1825,7 +1869,17 @@ void VulkanState::ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanT
     // Push descriptor sets
 
     {
-        std::vector<VkImageView> views;
+        std::vector<VkImageView>     views;
+        const std::vector<VkSampler> samplers{
+            m_defaultSampler,
+            m_defaultSampler,
+            m_defaultSampler,
+            m_defaultSampler,
+            m_defaultSampler,
+            m_defaultNearestSampler,
+            m_defaultNearestSampler,
+            m_defaultNearestSampler,
+        };
         if (m_passMode == 0) {
             views = {
                 m_helmetAlbedo.view,
@@ -1840,7 +1894,9 @@ void VulkanState::ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanT
         }
         if (m_passMode == 1) {
             views = {
-                m_computeOutAlbedo.view,
+                // Sample albedo through the SRGB-aliased view so the GPU does sRGB->linear,
+                // matching the source-texture path which loads the JPG as VK_FORMAT_R8G8B8A8_SRGB.
+                m_computeOutAlbedoSrgbView,
                 m_computeOutNormal.view,
                 m_computeOutAO.view,
                 m_computeOutMetallicRoughness.view,
@@ -1854,7 +1910,7 @@ void VulkanState::ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanT
         std::vector<VkWriteDescriptorSet>  writes(views.size());
         for (uint32_t i = 0; i < writes.size(); ++i) {
             imageInfos[i] = VkDescriptorImageInfo{
-                .sampler     = m_defaultSampler,
+                .sampler     = samplers[i],
                 .imageView   = views[i],
                 .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             };
