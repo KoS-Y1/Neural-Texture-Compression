@@ -135,7 +135,7 @@ class LatentPyramid(nn.Module):
 
 
 class TiledPositionalEncoder(nn.Module):
-    """Triangular-wave tiled PE (paper Sec 4.3.2).
+    """Triangular-wave tiled PE
 
     Pattern repeats every `tile` texels at the highest mip. `octaves` octaves
     per axis (frequencies 1, 2, 4, ...), sin and cos pair per octave; for
@@ -171,7 +171,7 @@ class TiledPositionalEncoder(nn.Module):
         return torch.cat(outs, dim=-1)
 
 
-# From NTC paper Sec 4.4: cheap approximation of GELU used at inference.
+# From NTC paper cheap approximation of GELU used at inference.
 class HardGELU(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.where(x < -1.5, torch.zeros_like(x),

@@ -54,7 +54,8 @@ SLANG_PUBLIC struct MlpParams
     SLANG_PUBLIC uint32_t b1;
     SLANG_PUBLIC uint32_t b2;
 
-    uint32_t paddings[2];
+    uint32_t _pad0;
+    uint32_t _pad1;
 };
 
 SLANG_PUBLIC struct ReconstructParams {

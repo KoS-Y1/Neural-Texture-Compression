@@ -1,7 +1,8 @@
 {
-    "shaders":[
+    "shaders": [
         "../runtime/shaders/forward.slang",
         "../runtime/shaders/skybox.slang",
-        "../runtime/shaders/reconstruct.slang"
+        "../runtime/shaders/reconstruct.slang",
+        "../runtime/shaders/forward_neural.slang"
     ]
 }

@@ -25,6 +25,12 @@ struct VulkanTexture {
     VmaAllocation allocation{};
 };
 
+struct VulkanBuffer {
+    VkBuffer                  buffer{};
+    VmaAllocation             allocation{};
+    [[maybe_unused]] uint32_t vertexCount{};
+};
+
 class VulkanState {
 public:
     VulkanState()                               = delete;
@@ -66,7 +72,9 @@ private:
     SDL_Window   *m_window{nullptr};
     const Camera &m_camera;
 
-    shader_io::GlobalUniforms m_globalUniforms{};
+    shader_io::GlobalUniforms    m_globalUniforms{};
+    shader_io::ReconstructParams m_reconstructParams{};
+    VulkanBuffer                 m_reconstructParamsBuffer{};
 
     // Device
     static constexpr uint32_t kQueueFamilyIndex{0};
@@ -112,16 +120,20 @@ private:
     // Profiling
     static constexpr size_t kFrameHistorySize = 128;
 
-    VkQueryPool                                    m_queryPool{};
-    float                                          m_timestampPeriod{1.0f};
-    float                                          m_pbrTime{0.0f};
-    float                                          m_computeReconstructTime{0.0f};
-    float                                          m_lastFrameTime{0.0f};
+    VkQueryPool m_queryPool{};
+    float       m_timestampPeriod{1.0f};
+    float       m_pbrTime{0.0f};
+    float       m_neuralForwardTime{0.0f};
+    float       m_computeReconstructTime{0.0f};
+    float       m_lastFrameTime{0.0f};
+
+    std::array<uint32_t, kMaxFramesInFlight> m_passModeInFlight{};
 
     struct PsnrEntry {
         const char *label{nullptr};
         float       psnr{0.0f};
     };
+
     std::array<PsnrEntry, 5> m_perOutputPsnr{};
     float                    m_overallPsnr{0.0f};
 
@@ -151,38 +163,28 @@ private:
 
 private:
     // Resources
-    struct VulkanVertexBuffer {
-        VkBuffer      buffer{};
-        uint32_t      vertexCount{};
-        VmaAllocation allocation{};
-    };
-
     VkSampler m_defaultSampler{};
     VkSampler m_defaultNearestSampler{};
 
     std::array<VulkanTexture, kMaxFramesInFlight> m_sceneColors{};
     std::array<VulkanTexture, kMaxFramesInFlight> m_sceneDepths{};
 
-    VulkanVertexBuffer m_helmetVertexBuffer{};
-    VulkanTexture      m_helmetAlbedo{};
-    VulkanTexture      m_helmetAO{};
-    VulkanTexture      m_helmetEmissive{};
-    VulkanTexture      m_helmetMetallicRoughness{};
-    VulkanTexture      m_helmetNormal{};
+    VulkanBuffer  m_helmetVertexBuffer{};
+    VulkanTexture m_helmetAlbedo{};
+    VulkanTexture m_helmetAO{};
+    VulkanTexture m_helmetEmissive{};
+    VulkanTexture m_helmetMetallicRoughness{};
+    VulkanTexture m_helmetNormal{};
 
-    VulkanVertexBuffer m_skyboxVertexBuffer{};
-    VulkanTexture      m_skyboxTexture{};
-    VulkanTexture      m_skyboxIrradiance{};
-    VulkanTexture      m_skyboxSpecular{};
-    VulkanTexture      m_brdfLut{};
+    VulkanBuffer  m_skyboxVertexBuffer{};
+    VulkanTexture m_skyboxTexture{};
+    VulkanTexture m_skyboxIrradiance{};
+    VulkanTexture m_skyboxSpecular{};
+    VulkanTexture m_brdfLut{};
 
     std::unique_ptr<MLPDecoder> m_mlp{};
 
     VulkanTexture m_computeOutAlbedo{};
-    // Aliased SRGB view of m_computeOutAlbedo's image. Compute writes raw bytes via the UNORM
-    // view; the forward shader samples through this SRGB view so the GPU does sRGB->linear
-    // automatically (matching the VK_FORMAT_R8G8B8A8_SRGB source albedo path).
-    VkImageView   m_computeOutAlbedoSrgbView{};
     VulkanTexture m_computeOutNormal{};
     VulkanTexture m_computeOutAO{};
     VulkanTexture m_computeOutMetallicRoughness{};
@@ -201,11 +203,15 @@ private:
 
     VulkanPipeline        m_forward{};
     VkDescriptorSetLayout m_forwardSetLayout{};
+
     VulkanPipeline        m_skybox{};
     VkDescriptorSetLayout m_skyboxSetLayout{};
 
     VulkanPipeline        m_reconstruct{};
     VkDescriptorSetLayout m_reconstructSetLayout{};
+
+    VulkanPipeline        m_forwardNeural{};
+    VkDescriptorSetLayout m_forwardNeuralSetLayout{};
 
     VkDescriptorPool m_descriptorPool{};
 
@@ -215,6 +221,7 @@ private:
 
     void ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth);
     void Skybox(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
+    void ForwardNeural(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth);
     void ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
     void ReconstructComputePass();
 
