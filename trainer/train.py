@@ -178,6 +178,56 @@ def export_ntc(pyramid: mlp.LatentPyramid, mlp_decoder: mlp.MlpDecoder, pe: mlp.
     }, path)
 
 
+def load_ntc(path: str | Path, device: torch.device | None = None) -> tuple[
+    mlp.LatentPyramid, mlp.MlpDecoder, mlp.TiledPositionalEncoder]:
+    """
+    Loads a saved NTC model checkpoint and reconstructs the network architectures.
+    """
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Load the checkpoint dictionary
+    checkpoint = torch.load(path, map_location=device, weights_only=True)
+
+    # Extract architecture configuration
+    config = checkpoint['config']
+    base_resolution = config['base_resolution']
+    c0 = config['c0']
+    c1 = config['c1']
+    num_bits = checkpoint['num_bits']
+
+    pe = mlp.TiledPositionalEncoder().to(device)
+    # Restore the attributes if they are mutable in your mlp implementation
+    if hasattr(pe, 'tile'):
+        pe.tile = checkpoint['pe_tile']
+    if hasattr(pe, 'num_freq'):
+        pe.num_freq = checkpoint['pe_octaves']
+
+    pyramid = mlp.LatentPyramid(
+        base_resolution=base_resolution,
+        c0=c0,
+        c1=c1,
+        num_bits=num_bits
+    ).to(device)
+    pyramid.load_state_dict(checkpoint['pyramid_state'])
+
+    mlp_state = checkpoint['mlp_weights']
+
+    # Infer output channels by looking at the first dimension of the last weight tensor
+    weight_keys = [k for k in mlp_state.keys() if 'weight' in k]
+    last_weight_key = weight_keys[-1]
+    output_channels = mlp_state[last_weight_key].shape[0]
+
+    mlp_decoder = mlp.MlpDecoder(
+        latent_dim=c0 * 4 + c1,
+        pe_dim=pe.out_dim,
+        output_channels=output_channels,
+        hidden_dim=64
+    ).to(device)
+    mlp_decoder.load_state_dict(mlp_state)
+
+    return pyramid, mlp_decoder, pe
+
 def _grid_to_array_layers(grid: torch.Tensor, num_bits: int) -> np.ndarray:
     """[1, C, H, W] grid (in asymmetric quant range) -> [L, H, W, 4] UNORM8 layout.
 
@@ -413,7 +463,7 @@ def diff_image(orig: torch.Tensor, rec: torch.Tensor, amplify: float = 5.0) -> I
     return tensor_to_pil(diff.clamp(0, 1))
 
 
-def main(resolution=None, num_iter=250000):
+def main(resolution=None, num_iter=250000, is_load=True):
     ASSETS_EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
     paths = {
@@ -431,15 +481,17 @@ def main(resolution=None, num_iter=250000):
 
     resolution = bundle.shape[-1]
 
-    pyramid, mlp_decoder, pe = train_ntc(bundle, num_iter=num_iter)
+    if is_load:
+        pyramid, mlp_decoder, pe = load_ntc(ASSETS_EXPORT_DIR / "ntc.pt")
+        device = next(mlp_decoder.parameters()).device
+    else:
+        pyramid, mlp_decoder, pe = train_ntc(bundle, num_iter=num_iter)
+        device = next(mlp_decoder.parameters()).device
+        print("Saving compressed NTC model...")
+        export_ntc(pyramid, mlp_decoder, pe, str(ASSETS_EXPORT_DIR / "ntc.pt"))
 
-    device = next(mlp_decoder.parameters()).device
-
-    print("Saving compressed NTC model...")
-    export_ntc(pyramid, mlp_decoder, pe, str(ASSETS_EXPORT_DIR / "ntc.pt"))
-
-    print("Saving runtime layout for C++ ...")
-    export_runtime(pyramid, mlp_decoder, pe, ASSETS_EXPORT_DIR / "runtime")
+        print("Saving runtime layout for C++ ...")
+        export_runtime(pyramid, mlp_decoder, pe, ASSETS_EXPORT_DIR / "runtime")
 
     print("Reconstructing full textures...")
     reconstructed = reconstruct_texture(resolution, pyramid, mlp_decoder, pe, device, mip=0)

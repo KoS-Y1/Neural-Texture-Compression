@@ -16,9 +16,6 @@
     "name" : "simdjson",
     "version>=" : "4.2.4"
   }, {
-    "name" : "shader-slang",
-    "version>=" : "2025.22.1"
-  }, {
     "name" : "stb",
     "version>=" : "2024-07-29#1"
   }, {
@@ -31,5 +28,8 @@
   }, {
     "name" : "glm",
     "version>=" : "1.0.3"
+  }, {
+    "name" : "shader-slang",
+    "version>=" : "2026.5"
   } ]
 }

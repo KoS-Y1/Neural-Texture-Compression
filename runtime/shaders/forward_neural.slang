@@ -42,9 +42,7 @@ VSOut vertexMain(const VSIn input)
 {
     VSOut output;
 
-    static const float4x4 identity = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
-
-    const float3x3 normalMatrix = float3x3(identity);
+    const float3x3 normalMatrix = float3x3(kIdentity);
 
     float3 T, B;
     const float3 N = normalize(mul(input.normal, normalMatrix));
@@ -61,7 +59,7 @@ VSOut vertexMain(const VSIn input)
         B = cross(N, T);
     }
 
-    output.worldPos = mul(float4(input.pos, 1.0f), identity).xyz;
+    output.worldPos = mul(float4(input.pos, 1.0f), kIdentity).xyz;
     output.sv_position = mul(float4(output.worldPos, 1.0f), pushConstants.viewProj);
     output.TBN = float3x3(T, B, N);
     output.uv = input.uv;
@@ -76,7 +74,7 @@ float4 fragmentMain(VSOut vsStage)
     uv.y = -uv.y;
 
     const float output[shader_io::kOutDim] =
-        MLPSample(uv, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
+        MlpSampleBilinearCoopVec(uv, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
 
     const float3 srgbAlbedo = float3(output[0], output[1], output[2]);
     const float3 albedo = pow(abs(srgbAlbedo), 2.2f);

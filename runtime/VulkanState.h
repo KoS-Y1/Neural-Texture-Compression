@@ -92,6 +92,10 @@ private:
     static constexpr VkPresentModeKHR kPresentMode{VK_PRESENT_MODE_FIFO_KHR};
     static constexpr VkFormat         kSceneColorFormat{VK_FORMAT_R16G16B16A16_SFLOAT};
     static constexpr VkFormat         kSceneDepthFormat{VK_FORMAT_D32_SFLOAT};
+    static constexpr VkFormat         kGBufferWorldPosFormat{VK_FORMAT_R32G32B32A32_SFLOAT};
+    static constexpr VkFormat         kGBufferTBFormat{VK_FORMAT_R16G16B16A16_SFLOAT};
+    static constexpr VkFormat         kGBufferNormalFormat{VK_FORMAT_R16G16B16A16_SFLOAT};
+    static constexpr VkFormat         kGBufferUVFormat{VK_FORMAT_R32G32_SFLOAT};
     static constexpr uint32_t         kMinSwapchainImage{2};
     static constexpr uint32_t         kMaxSwapchainImage{8};
     static constexpr uint32_t         kMaxFramesInFlight{2};
@@ -124,6 +128,8 @@ private:
     float       m_timestampPeriod{1.0f};
     float       m_pbrTime{0.0f};
     float       m_neuralForwardTime{0.0f};
+    float       m_neuralDeferredTime{0.0f};
+    float       m_neuralDeferredCoopVecTime{0.0f};
     float       m_computeReconstructTime{0.0f};
     float       m_lastFrameTime{0.0f};
 
@@ -169,6 +175,11 @@ private:
     std::array<VulkanTexture, kMaxFramesInFlight> m_sceneColors{};
     std::array<VulkanTexture, kMaxFramesInFlight> m_sceneDepths{};
 
+    std::array<VulkanTexture, kMaxFramesInFlight> m_gbufferWorldPosMeshHit{};
+    std::array<VulkanTexture, kMaxFramesInFlight> m_gbufferTB{};
+    std::array<VulkanTexture, kMaxFramesInFlight> m_gbufferNormal{};
+    std::array<VulkanTexture, kMaxFramesInFlight> m_gbufferUV{};
+
     VulkanBuffer  m_helmetVertexBuffer{};
     VulkanTexture m_helmetAlbedo{};
     VulkanTexture m_helmetAO{};
@@ -185,6 +196,7 @@ private:
     std::unique_ptr<MLPDecoder> m_mlp{};
 
     VulkanTexture m_computeOutAlbedo{};
+    VkImageView   m_computeOutAlbedoSrgbView{};
     VulkanTexture m_computeOutNormal{};
     VulkanTexture m_computeOutAO{};
     VulkanTexture m_computeOutMetallicRoughness{};
@@ -213,15 +225,27 @@ private:
     VulkanPipeline        m_forwardNeural{};
     VkDescriptorSetLayout m_forwardNeuralSetLayout{};
 
+    VulkanPipeline m_gbuffer{};
+
+    VulkanPipeline        m_deferredNeural{};
+    VkDescriptorSetLayout m_deferredNeuralSetLayout{};
+
+    VulkanPipeline        m_deferredNeuralCoopVec{};
+    VkDescriptorSetLayout m_deferredNeuralCoopSetLayout{};
+
     VkDescriptorPool m_descriptorPool{};
 
     uint32_t m_passMode{0};
 
     void InitPipelines();
 
-    void ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth);
+    void ForwardPBR(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
     void Skybox(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
-    void ForwardNeural(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth);
+    void ForwardNeural(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
+    void Gbuffer(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
+    void DeferredNeural(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
+    void DeferredNeuralCoopVec(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
+
     void ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
     void ReconstructComputePass();
 

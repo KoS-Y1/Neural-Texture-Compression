@@ -44,11 +44,8 @@ VSOut vertexMain(const VSIn input)
 {
     VSOut output;
 
-    static const float4x4 identity = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1 };
 
-    
-
-    const float3x3 normalMatrix = float3x3(identity);
+    const float3x3 normalMatrix = float3x3(kIdentity);
 
     float3 T, B;
     const float3 N = normalize(mul(input.normal, normalMatrix));
@@ -65,7 +62,7 @@ VSOut vertexMain(const VSIn input)
         B = cross(N, T);
     }
 
-    output.worldPos = mul(float4(input.pos, 1.0f), identity).xyz;
+    output.worldPos = mul(float4(input.pos, 1.0f), kIdentity).xyz;
     output.sv_position = mul(float4(output.worldPos, 1.0f), pushConstants.viewProj);
     output.TBN = float3x3(T, B, N);
     output.uv = input.uv;

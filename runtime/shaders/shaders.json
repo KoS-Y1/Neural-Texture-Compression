@@ -3,6 +3,9 @@
         "../runtime/shaders/forward.slang",
         "../runtime/shaders/skybox.slang",
         "../runtime/shaders/reconstruct.slang",
-        "../runtime/shaders/forward_neural.slang"
+        "../runtime/shaders/forward_neural.slang",
+        "../runtime/shaders/gbuffer.slang",
+        "../runtime/shaders/deferred_neural.slang",
+        "../runtime/shaders/deferred_neural_coopvec.slang"
     ]
 }

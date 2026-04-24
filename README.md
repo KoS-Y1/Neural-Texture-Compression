@@ -5,14 +5,14 @@
 
 Final reconstruction PSNR (vs original, full-res):
 
-|                   | PSNR     | MSE      |
-|-------------------|----------|----------|
-| Albedo            | 27.06 dB | 0.001969 |
-| Normal            | 34.38 dB | 0.000365 |
-| AO                | 32.10 dB | 0.000616 |
-| MetallicRoughness | 29.55 dB | 0.001109 |
-| Emissive          | 35.46 dB | 0.000285 |
-| Overall           | 30.92 dB | 0.000809 |
+|                   | PSNR     | MSE         |
+|-------------------|----------|-------------|
+| Albedo            | 34.78 dB | 0.000332    |
+| Normal            | 39.06 dB | 0.000124    |
+| AO                | 39.55 dB | 0.000111    |
+| MetallicRoughness | 35.56 dB | 0.000278    |
+| Emissive          | 46.95 dB | 0.000020    |
+| Overall           | 37.62 dB | 0.000173 mp |
 
 ## Reference
 

@@ -4,6 +4,7 @@
 
 #include "ShaderCompiler.h"
 
+#include <chrono>
 #include <filesystem>
 
 #include <simdjson.h>
@@ -21,10 +22,16 @@ ShaderCompiler::ShaderCompiler() {
         .forceGLSLScalarBufferLayout = true
     };
 
+#if defined(NDEBUG)
+    constexpr int kDebugInfo = 0;
+#else
+    constexpr int kDebugInfo = 1;
+#endif
+
     std::vector<slang::CompilerOptionEntry> options{
         {slang::CompilerOptionName::EmitSpirvDirectly,       {slang::CompilerOptionValueKind::Int, 1}},
         {slang::CompilerOptionName::VulkanUseEntryPointName, {slang::CompilerOptionValueKind::Int, 1}},
-        {slang::CompilerOptionName::DebugInformation,        {slang::CompilerOptionValueKind::Int, 1}},
+        {slang::CompilerOptionName::DebugInformation,        {slang::CompilerOptionValueKind::Int, kDebugInfo}},
     };
 
     slang::SessionDesc session{
@@ -83,6 +90,16 @@ bool ShaderCompiler::Compile(const std::string &filePath) {
     DebugInfo("Loading shader from file {}", filePath);
     m_diagnosticMessage.clear();
 
+    using clock = std::chrono::steady_clock;
+    const auto overallStart = clock::now();
+    auto       phaseStart   = overallStart;
+    auto       lapMs        = [&phaseStart]() {
+        const auto now = clock::now();
+        const float ms = std::chrono::duration<float, std::milli>(now - phaseStart).count();
+        phaseStart     = now;
+        return ms;
+    };
+
     std::filesystem::path path{filePath};
     const std::string     fileName    = path.filename().string();
     const std::string     moduleName  = path.stem().string();
@@ -95,6 +112,7 @@ bool ShaderCompiler::Compile(const std::string &filePath) {
     Slang::ComPtr<slang::IModule> module;
     module = m_session->loadModuleFromSourceString(moduleName.c_str(), fileName.c_str(), slangSource.c_str(), diagnostics.writeRef());
     LogAndAppendDiagnostics(diagnostics);
+    const float loadMs = lapMs();
 
     if (!module) {
         return false;
@@ -120,6 +138,7 @@ bool ShaderCompiler::Compile(const std::string &filePath) {
         diagnostics.writeRef()
     );
     LogAndAppendDiagnostics(diagnostics);
+    const float composeMs = lapMs();
     if (SLANG_FAILED(result) || !composedProgram) {
         return false;
     }
@@ -128,6 +147,7 @@ bool ShaderCompiler::Compile(const std::string &filePath) {
     Slang::ComPtr<slang::IComponentType> linkedProgram;
     result = composedProgram->link(linkedProgram.writeRef(), diagnostics.writeRef());
     LogAndAppendDiagnostics(diagnostics);
+    const float linkMs = lapMs();
     if (SLANG_FAILED(result) || !linkedProgram) {
         return false;
     }
@@ -136,9 +156,22 @@ bool ShaderCompiler::Compile(const std::string &filePath) {
     Slang::ComPtr<ISlangBlob> spirv;
     result = linkedProgram->getTargetCode(0, spirv.writeRef(), diagnostics.writeRef());
     LogAndAppendDiagnostics(diagnostics);
+    const float emitMs = lapMs();
     if (SLANG_FAILED(result) || !spirv) {
         return false;
     }
+
+    const float totalMs = std::chrono::duration<float, std::milli>(clock::now() - overallStart).count();
+    DebugInfo(
+        "Compile timings for {}: load={:.1f}ms compose={:.1f}ms link={:.1f}ms emit={:.1f}ms total={:.1f}ms (spirv={} bytes)",
+        filePath,
+        loadMs,
+        composeMs,
+        linkMs,
+        emitMs,
+        totalMs,
+        spirv->getBufferSize()
+    );
 
     m_spirvs.emplace(filePath, spirv);
     m_shaderPrograms.emplace(filePath, linkedProgram);
