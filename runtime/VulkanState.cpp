@@ -170,11 +170,11 @@ VulkanState::VulkanState(SDL_Window *window, const Camera &camera)
             if (static_cast<uint32_t>(srcW) != res || static_cast<uint32_t>(srcH) != res) {
                 DebugInfo("PSNR {}: source {}x{} vs reconstructed {}x{} — resolution mismatch, skipping", cmp.label, srcW, srcH, res, res);
             } else {
-                const uint8_t *recPixels = static_cast<const uint8_t *>(stagingInfo.pMappedData);
-                const size_t   pixels    = static_cast<size_t>(res) * static_cast<size_t>(res);
-                const double   sse       = AccumulateSquaredError(srcPixels, recPixels, pixels);
-                const size_t   samples   = pixels * 3;
-                const double   psnr      = MseToPsnrDb(sse / static_cast<double>(samples));
+                const auto  *recPixels = static_cast<const uint8_t *>(stagingInfo.pMappedData);
+                const size_t pixels    = static_cast<size_t>(res) * static_cast<size_t>(res);
+                const double sse       = AccumulateSquaredError(srcPixels, recPixels, pixels);
+                const size_t samples   = pixels * 3;
+                const double psnr      = MseToPsnrDb(sse / static_cast<double>(samples));
                 DebugInfo("PSNR {:>15s}: {:.2f} dB", cmp.label, psnr);
 
                 m_perOutputPsnr[cmpIndex]  = {cmp.label, static_cast<float>(psnr)};
@@ -256,6 +256,9 @@ void VulkanState::Run() {
             }
             if (recordedMode == 3) {
                 m_neuralDeferredCoopVecTime = ms;
+            }
+            if (recordedMode == 4) {
+                m_neuralDeferredCoopMatTime = ms;
             }
         }
     }
@@ -343,6 +346,10 @@ void VulkanState::Run() {
     if (m_passMode == 3) {
         Gbuffer(commandBuffer, sceneColor, sceneDepth);
         DeferredNeuralCoopVec(commandBuffer, sceneColor);
+    }
+    if (m_passMode == 4) {
+        Gbuffer(commandBuffer, sceneColor, sceneDepth);
+        DeferredNeuralCoopMat(commandBuffer, sceneColor);
     }
 
     vkCmdWriteTimestamp2(commandBuffer, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, m_queryPool, m_currentFrameIndex * 2 + 1);
@@ -618,6 +625,7 @@ void VulkanState::InitState() {
             VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME,
             VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME,
             VK_NV_COOPERATIVE_VECTOR_EXTENSION_NAME,
+            VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME,
             VK_EXT_SHADER_REPLICATED_COMPOSITES_EXTENSION_NAME,
 
         };
@@ -629,9 +637,16 @@ void VulkanState::InitState() {
             .shaderReplicatedComposites = VK_TRUE
         };
 
+        VkPhysicalDeviceCooperativeMatrixFeaturesKHR coopMatFeatures{
+            .sType                               = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR,
+            .pNext                               = &shaderRepFeatures,
+            .cooperativeMatrix                   = VK_TRUE,
+            .cooperativeMatrixRobustBufferAccess = VK_FALSE,
+        };
+
         VkPhysicalDeviceCooperativeVectorFeaturesNV coopVecFeatures{
             .sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_COOPERATIVE_VECTOR_FEATURES_NV,
-            .pNext             = &shaderRepFeatures,
+            .pNext             = &coopMatFeatures,
             .cooperativeVector = VK_TRUE
         };
 
@@ -643,10 +658,11 @@ void VulkanState::InitState() {
         };
 
         VkPhysicalDeviceVulkan12Features feature12{
-            .sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
-            .pNext             = &feature13,
-            .shaderFloat16     = VK_TRUE,
-            .vulkanMemoryModel = VK_TRUE,
+            .sType                        = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES,
+            .pNext                        = &feature13,
+            .shaderFloat16                = VK_TRUE,
+            .vulkanMemoryModel            = VK_TRUE,
+            .vulkanMemoryModelDeviceScope = VK_TRUE,
         };
 
         VkPhysicalDeviceVulkan11Features feature11{
@@ -1385,7 +1401,7 @@ void VulkanState::InitResources() {
 }
 
 void VulkanState::WaitAndRestFence(const VkFence &fence, uint64_t timeout) const {
-    VkResult result = vkWaitForFences(m_device, 1, &fence, VK_TRUE, timeout);
+    VkResult result = vkWaitForFences(m_device, 1, &fence, VK_TRUE, UINT64_MAX);
     DebugCheckCritical(result == VK_SUCCESS, "Failed to wait for fence ");
 
     result = vkResetFences(m_device, 1, &fence);
@@ -1578,6 +1594,34 @@ void VulkanState::InitPipelines() {
         VkResult result = vkCreateDescriptorSetLayout(m_device, &infoSetLayout, nullptr, &m_deferredNeuralCoopSetLayout);
         DebugCheckCritical(result == VK_SUCCESS, "Failed to create deferred neural coopvec descriptor set layout");
         m_deletionQueue.Push([&]() { vkDestroyDescriptorSetLayout(m_device, m_deferredNeuralCoopSetLayout, nullptr); });
+    }
+
+    // Deferred neural coop mat
+    {
+        const std::vector<VkDescriptorSetLayoutBinding> bindings{
+            {0,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // latentLo
+            {1,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // latentHi
+            {2,  VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,         1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // mlpBuffer
+            {3,  VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,         1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // reconstructParams
+            {4,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer0 worldPos
+            {5,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer1 TB
+            {6,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer2 N
+            {7,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // gbuffer3 UV
+            {8,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // irradiance
+            {9,  VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // specular
+            {10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // brdfLUT
+            {11, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,          1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}, // outputImage
+        };
+
+        const VkDescriptorSetLayoutCreateInfo infoSetLayout{
+            .sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            .flags        = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+            .bindingCount = static_cast<uint32_t>(bindings.size()),
+            .pBindings    = bindings.data(),
+        };
+        VkResult result = vkCreateDescriptorSetLayout(m_device, &infoSetLayout, nullptr, &m_deferredNeuralCoopMatSetLayout);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create deferred neural coopmat descriptor set layout");
+        m_deletionQueue.Push([&]() { vkDestroyDescriptorSetLayout(m_device, m_deferredNeuralCoopMatSetLayout, nullptr); });
     }
 
     // Forward pipeline
@@ -2404,6 +2448,57 @@ void VulkanState::InitPipelines() {
         result = vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &infoPipeline, nullptr, &m_deferredNeuralCoopVec.pipeline);
         DebugCheckCritical(result == VK_SUCCESS, "Failed to create deferred neural coopvec compute pipeline");
         m_deletionQueue.Push([&]() { vkDestroyPipeline(m_device, m_deferredNeuralCoopVec.pipeline, nullptr); });
+
+        vkDestroyShaderModule(m_device, shaderModule, nullptr);
+    }
+
+    // Deferred neural coopmat pipeline
+    {
+        const VkPushConstantRange pushConstantRange{
+            .stageFlags = VK_SHADER_STAGE_COMPUTE_BIT,
+            .offset     = 0,
+            .size       = sizeof(shader_io::GlobalUniforms),
+        };
+        const VkPipelineLayoutCreateInfo infoLayout{
+            .sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
+            .setLayoutCount         = 1,
+            .pSetLayouts            = &m_deferredNeuralCoopMatSetLayout,
+            .pushConstantRangeCount = 1,
+            .pPushConstantRanges    = &pushConstantRange,
+        };
+        VkResult result = vkCreatePipelineLayout(m_device, &infoLayout, nullptr, &m_deferredNeuralCoopMat.layout);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create deferred neural coopmat pipeline layout");
+        m_deletionQueue.Push([&]() { vkDestroyPipelineLayout(m_device, m_deferredNeuralCoopMat.layout, nullptr); });
+
+        constexpr const char *kDeferredNeuralCoopMatDir = "../runtime/shaders/deferred_neural_coopmat.slang";
+
+        VkShaderModuleCreateInfo infoShaderModule{
+            .sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = shaderCompiler.GetSpirvSize(kDeferredNeuralCoopMatDir),
+            .pCode    = shaderCompiler.GetSpirv(kDeferredNeuralCoopMatDir),
+        };
+        VkShaderModule shaderModule{};
+        result = vkCreateShaderModule(m_device, &infoShaderModule, nullptr, &shaderModule);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create shader module for {}", kDeferredNeuralCoopMatDir);
+
+        std::vector<std::pair<std::string, VkShaderStageFlagBits>> entryPoints = shaderCompiler.GetEntryPoints(kDeferredNeuralCoopMatDir);
+        DebugCheckCritical(entryPoints.size() == 1, "Deferred neural coopmat shader must have exactly one entry point");
+
+        const VkPipelineShaderStageCreateInfo infoStage{
+            .sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+            .stage  = entryPoints[0].second,
+            .module = shaderModule,
+            .pName  = entryPoints[0].first.c_str(),
+        };
+
+        const VkComputePipelineCreateInfo infoPipeline{
+            .sType  = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage  = infoStage,
+            .layout = m_deferredNeuralCoopMat.layout,
+        };
+        result = vkCreateComputePipelines(m_device, VK_NULL_HANDLE, 1, &infoPipeline, nullptr, &m_deferredNeuralCoopMat.pipeline);
+        DebugCheckCritical(result == VK_SUCCESS, "Failed to create deferred neural coopmat compute pipeline");
+        m_deletionQueue.Push([&]() { vkDestroyPipeline(m_device, m_deferredNeuralCoopMat.pipeline, nullptr); });
 
         vkDestroyShaderModule(m_device, shaderModule, nullptr);
     }
@@ -3516,6 +3611,272 @@ void VulkanState::DeferredNeuralCoopVec(const VkCommandBuffer &commandBuffer, co
     }
 }
 
+void VulkanState::DeferredNeuralCoopMat(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const {
+    const VulkanTexture &gbWorldPos = m_gbufferWorldPosMeshHit[m_currentFrameIndex];
+    const VulkanTexture &gbTB       = m_gbufferTB[m_currentFrameIndex];
+    const VulkanTexture &gbNormal   = m_gbufferNormal[m_currentFrameIndex];
+    const VulkanTexture &gbUV       = m_gbufferUV[m_currentFrameIndex];
+
+    {
+        const std::vector<VkImageMemoryBarrier2> barriers{
+            VkImageMemoryBarrier2{
+                                  .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                  .srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  .srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                  .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  .dstAccessMask    = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  .oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  .image            = gbWorldPos.image,
+                                  .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                                  },
+            VkImageMemoryBarrier2{
+                                  .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                  .srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  .srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                  .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  .dstAccessMask    = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  .oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  .image            = gbTB.image,
+                                  .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                                  },
+            VkImageMemoryBarrier2{
+                                  .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                  .srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  .srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                  .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  .dstAccessMask    = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  .oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  .image            = gbNormal.image,
+                                  .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                                  },
+            VkImageMemoryBarrier2{
+                                  .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                  .srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  .srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                  .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  .dstAccessMask    = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+                                  .oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  .newLayout        = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                                  .image            = gbUV.image,
+                                  .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                                  },
+            VkImageMemoryBarrier2{
+                                  .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                  .srcStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+                                  .srcAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+                                  .dstStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                  .dstAccessMask    = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+                                  .oldLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                  .newLayout        = VK_IMAGE_LAYOUT_GENERAL,
+                                  .image            = sceneColor.image,
+                                  .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+                                  },
+        };
+        const VkDependencyInfo dep{
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size()),
+            .pImageMemoryBarriers    = barriers.data(),
+        };
+        vkCmdPipelineBarrier2(commandBuffer, &dep);
+    }
+
+    vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, m_deferredNeuralCoopMat.pipeline);
+
+    vkCmdPushConstants(
+        commandBuffer,
+        m_deferredNeuralCoopMat.layout,
+        VK_SHADER_STAGE_COMPUTE_BIT,
+        0,
+        sizeof(shader_io::GlobalUniforms),
+        &m_globalUniforms
+    );
+
+    {
+        const VkDescriptorImageInfo loInfo{
+            .sampler     = m_mlp->GetSampler(),
+            .imageView   = m_mlp->GetLatentLo().view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo hiInfo{
+            .sampler     = m_mlp->GetSampler(),
+            .imageView   = m_mlp->GetLatentHi().view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorBufferInfo mlpInfo{
+            .buffer = m_mlp->GetMlpBuffer(),
+            .offset = 0,
+            .range  = VK_WHOLE_SIZE,
+        };
+        const VkDescriptorBufferInfo paramsInfo{
+            .buffer = m_reconstructParamsBuffer.buffer,
+            .offset = 0,
+            .range  = VK_WHOLE_SIZE,
+        };
+        const VkDescriptorImageInfo gb0Info{
+            .sampler     = m_defaultNearestSampler,
+            .imageView   = gbWorldPos.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo gb1Info{
+            .sampler     = m_defaultNearestSampler,
+            .imageView   = gbTB.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo gb2Info{
+            .sampler     = m_defaultNearestSampler,
+            .imageView   = gbNormal.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo gb3Info{
+            .sampler     = m_defaultNearestSampler,
+            .imageView   = gbUV.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo irradianceInfo{
+            .sampler     = m_defaultNearestSampler,
+            .imageView   = m_skyboxIrradiance.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo specularInfo{
+            .sampler     = m_defaultNearestSampler,
+            .imageView   = m_skyboxSpecular.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo brdfInfo{
+            .sampler     = m_defaultNearestSampler,
+            .imageView   = m_brdfLut.view,
+            .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        };
+        const VkDescriptorImageInfo outInfo{
+            .imageView   = sceneColor.view,
+            .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+        };
+
+        std::vector<VkWriteDescriptorSet> writes(12);
+        writes[0] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 0,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &loInfo,
+        };
+        writes[1] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 1,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &hiInfo,
+        };
+        writes[2] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 2,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            .pBufferInfo     = &mlpInfo,
+        };
+        writes[3] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 3,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+            .pBufferInfo     = &paramsInfo,
+        };
+        writes[4] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 4,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &gb0Info,
+        };
+        writes[5] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 5,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &gb1Info,
+        };
+        writes[6] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 6,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &gb2Info,
+        };
+        writes[7] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 7,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &gb3Info,
+        };
+        writes[8] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 8,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &irradianceInfo,
+        };
+        writes[9] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 9,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &specularInfo,
+        };
+        writes[10] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 10,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+            .pImageInfo      = &brdfInfo,
+        };
+        writes[11] = {
+            .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+            .dstBinding      = 11,
+            .descriptorCount = 1,
+            .descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE,
+            .pImageInfo      = &outInfo,
+        };
+
+        vkCmdPushDescriptorSetKHR(
+            commandBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            m_deferredNeuralCoopMat.layout,
+            0,
+            static_cast<uint32_t>(writes.size()),
+            writes.data()
+        );
+    }
+
+    // numthreads(32, 1, 1) in deferred_neural_coopmat.slang
+    const uint32_t gx = (m_swapchainExtent.width + 31) / 32;
+    vkCmdDispatch(commandBuffer, gx, m_swapchainExtent.height, 1);
+
+    // GENERAL -> COLOR_ATTACHMENT_OPTIMAL so subsequent passes (skybox, ImGui) can load/blend
+    {
+        const VkImageMemoryBarrier2 barrier{
+            .sType            = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+            .srcStageMask     = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+            .srcAccessMask    = VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT,
+            .dstStageMask     = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+            .dstAccessMask    = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT,
+            .oldLayout        = VK_IMAGE_LAYOUT_GENERAL,
+            .newLayout        = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .image            = sceneColor.image,
+            .subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1},
+        };
+        const VkDependencyInfo dep{
+            .sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+            .imageMemoryBarrierCount = 1,
+            .pImageMemoryBarriers    = &barrier,
+        };
+        vkCmdPipelineBarrier2(commandBuffer, &dep);
+    }
+}
+
 void VulkanState::ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const {
     VkRenderingAttachmentInfo colorAttachment{
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -3710,6 +4071,7 @@ void VulkanState::DrawImGuiContent() {
             ImGui::RadioButton("Neural Forward PBR (CoopVec)", &mode, 1);
             ImGui::RadioButton("Neural Deferred PBR", &mode, 2);
             ImGui::RadioButton("Neural Deferred PBR (CoopVec)", &mode, 3);
+            ImGui::RadioButton("Neural Deferred PBR (CoopMat)", &mode, 4);
             ImGui::RadioButton("Pre-reconstructed PBR", &mode, 5);
             m_passMode = static_cast<uint32_t>(mode);
         }
@@ -3735,9 +4097,16 @@ void VulkanState::DrawImGuiContent() {
             ImGui::Text("Neural Forward (with CoopVec): %.3f ms", m_neuralForwardTime);
             ImGui::Text("Neural Deferred: %.3f ms", m_neuralDeferredTime);
             ImGui::Text("Neural Deferred (with CoopVec): %.3f ms", m_neuralDeferredCoopVecTime);
+            ImGui::Text("Neural Deferred (with CoopMat): %.3f ms", m_neuralDeferredCoopMatTime);
 
-            const std::vector<float> values =
-                {m_computeReconstructTime, m_pbrTime, m_neuralForwardTime, m_neuralDeferredTime, m_neuralDeferredCoopVecTime};
+            const std::vector<float> values = {
+                m_computeReconstructTime,
+                m_pbrTime,
+                m_neuralForwardTime,
+                m_neuralDeferredTime,
+                m_neuralDeferredCoopVecTime,
+                m_neuralDeferredCoopMatTime,
+            };
             ImGui::PlotHistogram(
                 "Compare (ms)",
                 values.data(),
@@ -3746,10 +4115,13 @@ void VulkanState::DrawImGuiContent() {
                 nullptr,
                 0.0f,
                 std::max(
-                    std::max(m_computeReconstructTime, std::max(m_pbrTime, std::max(m_neuralForwardTime, m_neuralDeferredCoopVecTime))) * 1.2f,
+                    std::max(
+                        std::max(m_computeReconstructTime, m_pbrTime),
+                        std::max(m_neuralForwardTime, std::max(m_neuralDeferredCoopVecTime, m_neuralDeferredCoopMatTime))
+                    ) * 1.2f,
                     0.001f
                 ),
-                ImVec2(0, 80)
+                ImVec2(0, 100)
             );
         }
 

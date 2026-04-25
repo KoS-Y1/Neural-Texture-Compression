@@ -38,22 +38,21 @@ RWTexture2D<float4> outputImage;
 [numthreads(32, 8, 1)]
 void computeMain(uint3 threadId: SV_DispatchThreadID)
 {
-    uint screenWidth, screenHeight;
+     uint screenWidth, screenHeight;
     outputImage.GetDimensions(screenWidth, screenHeight);
-    if (threadId.x >= screenWidth || threadId.y >= screenHeight)
+    const bool validPixel = (threadId.x < screenWidth) && (threadId.y < screenHeight);
+    const float2 screenUV = validPixel ? (float2(threadId.xy) + 0.5f) / float2(float(screenWidth), float(screenHeight))
+                                       : float2(0.0f, 0.0f);
+
+    const float4 worldPosHit = gbuffer0.SampleLevel(screenUV, 0);
+    const float2 meshUV = gbuffer3.SampleLevel(screenUV, 0).xy;
+    const float output[shader_io::kOutDim] =
+        MlpSampleCoopVec(meshUV, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
+
+    if (!validPixel)
     {
         return;
     }
-
-    const float2 screenUV = (float2(threadId.xy) + 0.5f) / float2(screenWidth, screenHeight);
-
-    // Mesh UV from gbuffer (already carries the same y-flip used by forward_neural).
-    const float2 meshUV = gbuffer3.SampleLevel(screenUV, 0).xy;
-
-    const float output[shader_io::kOutDim] =
-        MlpSampleBilinearCoopVec(meshUV, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
-
-    const float4 worldPosHit = gbuffer0.SampleLevel(screenUV, 0);
 
     if (worldPosHit.w < 0.5f)
     {

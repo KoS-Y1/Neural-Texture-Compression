@@ -34,7 +34,6 @@ Sampler2D<float4> brdfLutTexture;
 [[vk::binding(11, 0)]]
 RWTexture2D<float4> outputImage;
 
-
 [shader("compute")]
 [numthreads(32, 8, 1)]
 void computeMain(uint3 threadId: SV_DispatchThreadID, uint groupIndex: SV_GroupIndex)
@@ -42,24 +41,25 @@ void computeMain(uint3 threadId: SV_DispatchThreadID, uint groupIndex: SV_GroupI
 
     uint screenWidth, screenHeight;
     outputImage.GetDimensions(screenWidth, screenHeight);
-    if (threadId.x >= screenWidth || threadId.y >= screenHeight)
+    const bool validPixel = (threadId.x < screenWidth) && (threadId.y < screenHeight);
+    const float2 screenUV = validPixel ? (float2(threadId.xy) + 0.5f) / float2(float(screenWidth), float(screenHeight))
+                                       : float2(0.0f, 0.0f);
+
+    const float4 worldPosHit = gbuffer0.SampleLevel(screenUV, 0);
+    const float2 meshUV = gbuffer3.SampleLevel(screenUV, 0).xy;
+    const float output[shader_io::kOutDim] =
+        MlpSampleStandard(meshUV, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
+
+    if (!validPixel)
     {
         return;
     }
 
-    const float2 screenUV = (float2(threadId.xy) + 0.5f) / float2(screenWidth, screenHeight);
-
-    const float4 worldPosHit = gbuffer0.SampleLevel(screenUV, 0);
     if (worldPosHit.w < 0.5f)
     {
         outputImage[threadId.xy] = float4(0.0f, 0.0f, 0.0f, 1.0f);
         return;
     }
-
-    const float2 meshUV = gbuffer3.SampleLevel(screenUV, 0).xy;
-
-    const float output[shader_io::kOutDim] =
-        MlpSampleBilinearStandard(meshUV, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
 
     const float3 srgbAlbedo = float3(output[0], output[1], output[2]);
     const float3 albedo = pow(abs(srgbAlbedo), 2.2f);

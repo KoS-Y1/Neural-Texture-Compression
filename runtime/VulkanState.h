@@ -130,6 +130,7 @@ private:
     float       m_neuralForwardTime{0.0f};
     float       m_neuralDeferredTime{0.0f};
     float       m_neuralDeferredCoopVecTime{0.0f};
+    float       m_neuralDeferredCoopMatTime{0.0f};
     float       m_computeReconstructTime{0.0f};
     float       m_lastFrameTime{0.0f};
 
@@ -233,6 +234,9 @@ private:
     VulkanPipeline        m_deferredNeuralCoopVec{};
     VkDescriptorSetLayout m_deferredNeuralCoopSetLayout{};
 
+    VulkanPipeline        m_deferredNeuralCoopMat{};
+    VkDescriptorSetLayout m_deferredNeuralCoopMatSetLayout{};
+
     VkDescriptorPool m_descriptorPool{};
 
     uint32_t m_passMode{0};
@@ -245,6 +249,7 @@ private:
     void Gbuffer(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor, const VulkanTexture &sceneDepth) const;
     void DeferredNeural(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
     void DeferredNeuralCoopVec(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
+    void DeferredNeuralCoopMat(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
 
     void ImGuiPass(const VkCommandBuffer &commandBuffer, const VulkanTexture &sceneColor) const;
     void ReconstructComputePass();

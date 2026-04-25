@@ -74,7 +74,7 @@ float4 fragmentMain(VSOut vsStage)
     uv.y = -uv.y;
 
     const float output[shader_io::kOutDim] =
-        MlpSampleBilinearCoopVec(uv, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
+        MlpSampleCoopVec(uv, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
 
     const float3 srgbAlbedo = float3(output[0], output[1], output[2]);
     const float3 albedo = pow(abs(srgbAlbedo), 2.2f);

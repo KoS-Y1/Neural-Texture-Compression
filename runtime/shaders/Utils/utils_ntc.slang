@@ -20,9 +20,9 @@ internal float TriCos(float t)
 // ---------------------------------------------------------------------------
 // Input feature construction: shared between standard and coopvec paths.
 // ---------------------------------------------------------------------------
-internal float16_t[shader_io::kInDimPadded] BuildInputFeatures(
-    const float2 uv, const shader_io::ReconstructParams params,
-    const Sampler2DArray<float4> latentLoTexture, const Sampler2DArray<float4> latentHiTexture)
+public float16_t[shader_io::kInDimPadded] BuildInputFeatures(const float2 uv, const shader_io::ReconstructParams params,
+                                                             const Sampler2DArray<float4> latentLoTexture,
+                                                             const Sampler2DArray<float4> latentHiTexture)
 {
     float16_t feats[shader_io::kInDimPadded];
     [ForceUnroll]
@@ -113,16 +113,11 @@ internal float16_t[shader_io::kInDimPadded] BuildInputFeatures(
 
 // ---------------------------------------------------------------------------
 // Standard (scalar) path. Weights are read directly from a ByteAddressBuffer
-// (StorageBuffer storage class, covered by storageBuffer16BitAccess). We
-// intentionally avoid groupshared float16 because 16-bit Workgroup access
-// isn't covered by any core Vulkan feature we have enabled, and NV drivers
-// hit undefined/faulting behaviour for heavy scalar fp16 reads from
-// Workgroup memory.
 // ---------------------------------------------------------------------------
 [ForceInline]
-internal float16_t[OUT] LinearLayerStandard<let IN : int, let OUT : int>(
-    const float16_t[IN] input, const ByteAddressBuffer mlp,
-    const uint weightOffset, const uint biasOffset)
+internal float16_t[OUT] LinearLayerStandard<let IN : int, let OUT : int>(const float16_t[IN] input,
+                                                                         const ByteAddressBuffer mlp,
+                                                                         const uint weightOffset, const uint biasOffset)
 {
     float16_t output[OUT];
     for (int j = 0; j < OUT; ++j)
@@ -139,9 +134,10 @@ internal float16_t[OUT] LinearLayerStandard<let IN : int, let OUT : int>(
 }
 
 [ForceInline]
-internal float16_t[OUT] HardGELULayerStandard<let IN : int, let OUT : int>(
-    const float16_t[IN] input, const ByteAddressBuffer mlp,
-    const uint weightOffset, const uint biasOffset)
+internal float16_t[OUT] HardGELULayerStandard<let IN : int, let OUT : int>(const float16_t[IN] input,
+                                                                           const ByteAddressBuffer mlp,
+                                                                           const uint weightOffset,
+                                                                           const uint biasOffset)
 {
     float16_t x[OUT] = LinearLayerStandard<IN, OUT>(input, mlp, weightOffset, biasOffset);
 
@@ -161,9 +157,9 @@ internal float16_t[OUT] HardGELULayerStandard<let IN : int, let OUT : int>(
 }
 
 [ForceInline]
-internal float16_t[shader_io::kOutDim] MlpDecoderStandard(
-    const float16_t[shader_io::kInDimPadded] input,
-    const ByteAddressBuffer mlp, const shader_io::MlpParams params)
+internal float16_t[shader_io::kOutDim] MlpDecoderStandard(const float16_t[shader_io::kInDimPadded] input,
+                                                          const ByteAddressBuffer mlp,
+                                                          const shader_io::MlpParams params)
 {
     const float16_t h0[shader_io::kHiddenDim] =
         HardGELULayerStandard<shader_io::kInDimPadded, shader_io::kHiddenDim>(input, mlp, params.w0, params.b0);
@@ -182,12 +178,12 @@ internal float16_t[shader_io::kOutDim] MlpDecoderStandard(
 }
 
 [ForceInline]
-public float[shader_io::kOutDim] MlpSampleStandard(
-    const float2 uv, const shader_io::ReconstructParams params, const ByteAddressBuffer mlpBuffer,
-    const Sampler2DArray<float4> latentLoTexture, const Sampler2DArray<float4> latentHiTexture)
+public float[shader_io::kOutDim] MlpSampleStandard(const float2 uv, const shader_io::ReconstructParams params,
+                                                   const ByteAddressBuffer mlpBuffer,
+                                                   const Sampler2DArray<float4> latentLoTexture,
+                                                   const Sampler2DArray<float4> latentHiTexture)
 {
-    const float16_t inLayer[shader_io::kInDimPadded] =
-        BuildInputFeatures(uv, params, latentLoTexture, latentHiTexture);
+    const float16_t inLayer[shader_io::kInDimPadded] = BuildInputFeatures(uv, params, latentLoTexture, latentHiTexture);
     const float16_t outLayer[shader_io::kOutDim] = MlpDecoderStandard(inLayer, mlpBuffer, params.mlpParams);
 
     float output[shader_io::kOutDim];
@@ -200,15 +196,16 @@ public float[shader_io::kOutDim] MlpSampleStandard(
 }
 
 [ForceInline]
-public float[shader_io::kOutDim] MlpSampleBilinearStandard(
-    const float2 uv, const shader_io::ReconstructParams params, const ByteAddressBuffer mlpBuffer,
-    const Sampler2DArray<float4> latentLoTexture, const Sampler2DArray<float4> latentHiTexture)
+public float[shader_io::kOutDim] MlpSampleBilinearStandard(const float2 uv, const shader_io::ReconstructParams params,
+                                                           const ByteAddressBuffer mlpBuffer,
+                                                           const Sampler2DArray<float4> latentLoTexture,
+                                                           const Sampler2DArray<float4> latentHiTexture)
 {
     const float2 gridSize = float2(params.outputWidth, params.outputHeight);
-    const float2 invGrid  = 1.0f / gridSize;
-    const float2 p        = uv * gridSize - 0.5f;
-    const float2 pf       = floor(p);
-    const float2 fr       = p - pf;
+    const float2 invGrid = 1.0f / gridSize;
+    const float2 p = uv * gridSize - 0.5f;
+    const float2 pf = floor(p);
+    const float2 fr = p - pf;
 
     const float2 uv00 = (pf + float2(0.5f, 0.5f)) * invGrid;
     const float2 uv10 = (pf + float2(1.5f, 0.5f)) * invGrid;
@@ -239,9 +236,10 @@ public float[shader_io::kOutDim] MlpSampleBilinearStandard(
 // coopVecMatMulAddPacked.
 // ---------------------------------------------------------------------------
 [ForceInline]
-internal CoopVec<float16_t, OUT> LinearLayerCoopVec<let IN : int, let OUT : int>(
-    const CoopVec<float16_t, IN> input, const ByteAddressBuffer mlp,
-    const uint weightOffset, const uint biasOffset)
+internal CoopVec<float16_t, OUT> LinearLayerCoopVec<let IN : int, let OUT : int>(const CoopVec<float16_t, IN> input,
+                                                                                 const ByteAddressBuffer mlp,
+                                                                                 const uint weightOffset,
+                                                                                 const uint biasOffset)
 {
     return coopVecMatMulAddPacked<float16_t, OUT>(
         input, CoopVecComponentType::Float16, IN, mlp, weightOffset, CoopVecComponentType::Float16, mlp, biasOffset,
@@ -249,9 +247,10 @@ internal CoopVec<float16_t, OUT> LinearLayerCoopVec<let IN : int, let OUT : int>
 }
 
 [ForceInline]
-internal CoopVec<float16_t, OUT> HardGELULayerCoopVec<let IN : int, let OUT : int>(
-    const CoopVec<float16_t, IN> input, const ByteAddressBuffer mlp,
-    const uint weightOffset, const uint biasOffset)
+internal CoopVec<float16_t, OUT> HardGELULayerCoopVec<let IN : int, let OUT : int>(const CoopVec<float16_t, IN> input,
+                                                                                   const ByteAddressBuffer mlp,
+                                                                                   const uint weightOffset,
+                                                                                   const uint biasOffset)
 {
     // HardGELU(x):
     //   x <= -1.5        -> 0
@@ -272,8 +271,8 @@ internal CoopVec<float16_t, OUT> HardGELULayerCoopVec<let IN : int, let OUT : in
 
 [ForceInline]
 internal CoopVec<float16_t, shader_io::kOutDim> MlpDecoderCoopVec(
-    const CoopVec<float16_t, shader_io::kInDimPadded> input,
-    const ByteAddressBuffer mlp, const shader_io::MlpParams params)
+    const CoopVec<float16_t, shader_io::kInDimPadded> input, const ByteAddressBuffer mlp,
+    const shader_io::MlpParams params)
 {
     CoopVec<float16_t, shader_io::kHiddenDim> h0 =
         HardGELULayerCoopVec<shader_io::kInDimPadded, shader_io::kHiddenDim>(input, mlp, params.w0, params.b0);
@@ -288,12 +287,12 @@ internal CoopVec<float16_t, shader_io::kOutDim> MlpDecoderCoopVec(
 }
 
 [ForceInline]
-public float[shader_io::kOutDim] MlpSampleCoopVec(
-    const float2 uv, const shader_io::ReconstructParams params, const ByteAddressBuffer mlpBuffer,
-    const Sampler2DArray<float4> latentLoTexture, const Sampler2DArray<float4> latentHiTexture)
+public float[shader_io::kOutDim] MlpSampleCoopVec(const float2 uv, const shader_io::ReconstructParams params,
+                                                  const ByteAddressBuffer mlpBuffer,
+                                                  const Sampler2DArray<float4> latentLoTexture,
+                                                  const Sampler2DArray<float4> latentHiTexture)
 {
-    const float16_t feats[shader_io::kInDimPadded] =
-        BuildInputFeatures(uv, params, latentLoTexture, latentHiTexture);
+    const float16_t feats[shader_io::kInDimPadded] = BuildInputFeatures(uv, params, latentLoTexture, latentHiTexture);
 
     CoopVec<float16_t, shader_io::kInDimPadded> inLayer = CoopVec<float16_t, shader_io::kInDimPadded>(float16_t(0.0f));
     [ForceUnroll]
@@ -302,8 +301,7 @@ public float[shader_io::kOutDim] MlpSampleCoopVec(
         inLayer[i] = feats[i];
     }
 
-    const CoopVec<float16_t, shader_io::kOutDim> outLayer =
-        MlpDecoderCoopVec(inLayer, mlpBuffer, params.mlpParams);
+    const CoopVec<float16_t, shader_io::kOutDim> outLayer = MlpDecoderCoopVec(inLayer, mlpBuffer, params.mlpParams);
 
     float output[shader_io::kOutDim];
     [ForceUnroll]
@@ -315,15 +313,16 @@ public float[shader_io::kOutDim] MlpSampleCoopVec(
 }
 
 [ForceInline]
-public float[shader_io::kOutDim] MlpSampleBilinearCoopVec(
-    const float2 uv, const shader_io::ReconstructParams params, const ByteAddressBuffer mlpBuffer,
-    const Sampler2DArray<float4> latentLoTexture, const Sampler2DArray<float4> latentHiTexture)
+public float[shader_io::kOutDim] MlpSampleBilinearCoopVec(const float2 uv, const shader_io::ReconstructParams params,
+                                                          const ByteAddressBuffer mlpBuffer,
+                                                          const Sampler2DArray<float4> latentLoTexture,
+                                                          const Sampler2DArray<float4> latentHiTexture)
 {
     const float2 gridSize = float2(params.outputWidth, params.outputHeight);
-    const float2 invGrid  = 1.0f / gridSize;
-    const float2 p        = uv * gridSize - 0.5f;
-    const float2 pf       = floor(p);
-    const float2 fr       = p - pf;
+    const float2 invGrid = 1.0f / gridSize;
+    const float2 p = uv * gridSize - 0.5f;
+    const float2 pf = floor(p);
+    const float2 fr = p - pf;
 
     const float2 uv00 = (pf + float2(0.5f, 0.5f)) * invGrid;
     const float2 uv10 = (pf + float2(1.5f, 0.5f)) * invGrid;
