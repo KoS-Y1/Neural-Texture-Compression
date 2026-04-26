@@ -47,7 +47,7 @@ void computeMain(uint3 threadId: SV_DispatchThreadID)
     const float4 worldPosHit = gbuffer0.SampleLevel(screenUV, 0);
     const float2 meshUV = gbuffer3.SampleLevel(screenUV, 0).xy;
     const float output[shader_io::kOutDim] =
-        MlpSampleCoopVec(meshUV, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
+        MlpSampleBilinearCoopVec(meshUV, reconstructParams, mlpBuffer, latentLoTexture, latentHiTexture);
 
     if (!validPixel)
     {
