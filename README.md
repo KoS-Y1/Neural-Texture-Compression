@@ -1,41 +1,46 @@
 # Neural Rendering
 
-A neural texture compression and rendering experiment: an MLP is trained offline in PyTorch to compress PBR material textures into a compact latent representation, then reconstructed at runtime in a Vulkan + [Slang](https://github.com/shader-slang/slang) renderer using cooperative vector / cooperative matrix acceleration.
+A neural texture compression and rendering experiment: an MLP is trained offline in PyTorch to compress PBR material
+textures into a compact latent representation, then reconstructed at runtime in a
+Vulkan + [Slang](https://github.com/shader-slang/slang) renderer using cooperative vector / cooperative matrix
+acceleration.
 
 ## Offline Output Comparison
 
 The model is trained offline in PyTorch. The figure below shows the per-channel output:
 
-![Comparison](/assets/export/comparison.png)
+![Comparison](/docs/comparison.png)
 *(From left to right: input, latent, reconstructed, diff)*
 
 Final reconstruction PSNR (vs. original, full-res):
 
-|                   | PSNR     | MSE      |
-|-------------------|----------|----------|
-| Albedo            | 34.78 dB | 0.000332 |
-| Normal            | 39.06 dB | 0.000124 |
-| AO                | 39.55 dB | 0.000111 |
-| MetallicRoughness | 35.56 dB | 0.000278 |
-| Emissive          | 46.95 dB | 0.000020 |
+|                   | PSNR         | MSE          |
+|-------------------|--------------|--------------|
+| Albedo            | 34.78 dB     | 0.000332     |
+| Normal            | 39.06 dB     | 0.000124     |
+| AO                | 39.55 dB     | 0.000111     |
+| MetallicRoughness | 35.56 dB     | 0.000278     |
+| Emissive          | 46.95 dB     | 0.000020     |
 | **Overall**       | **37.62 dB** | **0.000173** |
 
 ## Runtime Inference
 
-The trained MLP is evaluated at runtime with Vulkan and [Slang](https://github.com/shader-slang/slang). As shown below, the runtime-reconstructed textures closely match the originals.
+The trained MLP is evaluated at runtime with Vulkan and [Slang](https://github.com/shader-slang/slang). As shown below,
+the runtime-reconstructed textures closely match the originals.
 
 ![Runtime Comparison](/docs/ntc.png)
 *(Left: original textures; right: runtime reconstructed textures)*
 
-Pre-reconstructing the full texture set with a compute shader using **cooperative vector** takes **0.744 ms** with the following PSNR (vs. original, full-res):
+Pre-reconstructing the full texture set with a compute shader using **cooperative vector** takes **0.744 ms** with the
+following PSNR (vs. original, full-res):
 
-|                   | PSNR     |
-|-------------------|----------|
-| Albedo            | 35.34 dB |
-| Normal            | 39.54 dB |
-| AO                | 39.78 dB |
-| MetallicRoughness | 35.87 dB |
-| Emissive          | 47.03 dB |
+|                   | PSNR         |
+|-------------------|--------------|
+| Albedo            | 35.34 dB     |
+| Normal            | 39.54 dB     |
+| AO                | 39.78 dB     |
+| MetallicRoughness | 35.87 dB     |
+| Emissive          | 47.03 dB     |
 | **Overall**       | **38.03 dB** |
 
 ### Full-screen Inference
@@ -60,7 +65,8 @@ Pre-reconstructed textures look fine, but real-time reconstruction shows visible
 
 ![Blocky](/docs/blocky.png)
 
-To reduce the artifacts, I applied bilinear filtering during sampling. Results below (the cooperative matrix deferred path is omitted because it is too slow to be useful here):
+To reduce the artifacts, I applied bilinear filtering during sampling. Results below (the cooperative matrix deferred
+path is omitted because it is too slow to be useful here):
 
 ![Bilinear](/docs/bilinear.png)
 
